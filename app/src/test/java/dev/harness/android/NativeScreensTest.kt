@@ -2,11 +2,15 @@ package dev.harness.android
 
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.semantics.SemanticsActions
 import dev.harness.android.ui.ConnectionDialog
 import dev.harness.android.ui.QuestionDialog
-import dev.harness.android.ui.ToolActivity
+import dev.harness.android.ui.SessionActivity
+import dev.harness.android.ui.SessionListItem
+import dev.harness.android.ui.conversationContent
 import dev.harness.android.ui.DraftAttachments
 import dev.harness.android.ui.SlashMenu
+import dev.harness.android.ui.Markdown
 import dev.harness.core.*
 import kotlinx.serialization.json.JsonElement
 import org.junit.Assert.*
@@ -52,13 +56,45 @@ class NativeScreensTest {
         assertEquals("branch", answer.text("id"))
         assertEquals("main", answer["selected"].array().single().string())
     }
-    @Test fun oldToolsStayHiddenUntilHistoryIsExpanded() {
-        val tools = listOf(DisplayMessage("t1", "tool", name = "older-search", result = "ok"), DisplayMessage("t2", "tool", name = "latest-test"))
-        compose.setContent { HarnessTheme { ToolActivity(tools) } }
+    @Test fun reasoningAndToolsShareOneLatestItemAndExpandableHistory() {
+        val messages = androidx.compose.runtime.mutableStateOf(listOf(
+            DisplayMessage("a1", "assistant", text = "保留答案正文", reasoning = "之前的思考"),
+            DisplayMessage("t1", "tool", name = "latest-test", result = "ok"),
+        ))
+        val initial = conversationContent(messages.value)
+        assertEquals(listOf("assistant", "tool"), initial.messages.map { it.kind })
+        assertEquals("保留答案正文", initial.messages.first().text)
+        assertTrue(initial.messages.first().reasoning.isEmpty())
+        compose.setContent { HarnessTheme { SessionActivity(conversationContent(messages.value).activity) } }
         compose.onNodeWithText("latest-test").assertExists()
-        compose.onNodeWithText("older-search").assertDoesNotExist()
-        compose.onNodeWithText("展开历史工具调用（1）").performClick()
-        compose.onNodeWithText("older-search").assertExists()
+        compose.onNodeWithText("思考过程").assertDoesNotExist()
+        compose.onNodeWithText("展开历史过程（1）").performClick()
+        compose.onNodeWithContentDescription("展开思考过程").performClick()
+        compose.onNodeWithText("之前的思考").assertExists()
+        compose.onNodeWithText("收起历史过程（1）").performClick()
+        compose.runOnIdle { messages.value += DisplayMessage("a2", "assistant", reasoning = "新的思考", streaming = true) }
+        compose.onNodeWithText("latest-test").assertDoesNotExist()
+        compose.onNodeWithText("正在思考").assertExists()
+        compose.onNodeWithText("之前的思考").assertDoesNotExist()
+        compose.onNodeWithContentDescription("展开思考过程").performClick()
+        compose.onNodeWithText("新的思考").assertExists()
+        assertEquals(listOf("assistant", "reasoning"), conversationContent(messages.value).messages.map { it.kind })
+    }
+    @Test fun longPressArchivesAndRestoresWithoutOpeningTheConversation() {
+        val archived = androidx.compose.runtime.mutableStateOf(false)
+        var opened = 0
+        val session = SessionSummary("s1", "测试会话", "/project", 0, false)
+        compose.setContent { HarnessTheme { SessionListItem(session, false, archived.value, true, false, { opened++ }, { archived.value = it }) } }
+        compose.onNodeWithText("测试会话").performTouchInput { longClick() }
+        assertEquals(0, opened)
+        assertFalse(archived.value)
+        compose.onNodeWithText("归档会话").performClick()
+        assertTrue(archived.value)
+        compose.onNodeWithText("测试会话").performTouchInput { longClick() }
+        compose.onNodeWithText("取消归档").performClick()
+        assertFalse(archived.value)
+        compose.onNodeWithText("测试会话").performClick()
+        assertEquals(1, opened)
     }
     @Test fun attachmentRemovalIsDisabledDuringTransfer() {
         val sending = androidx.compose.runtime.mutableStateOf(true)
@@ -89,5 +125,37 @@ class NativeScreensTest {
         assertFalse(report.contains("secret"))
         assertFalse(report.contains("bearer-token"))
         assertTrue(report.contains("MainActivity.kt:42"))
+    }
+    @Test fun fontSizeSettingUpdatesNativeMarkdownAndSurvivesReload() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SessionStore(context)
+        val scale = androidx.compose.runtime.mutableStateOf(1f)
+        lateinit var root: android.view.View
+        fun findPreview(view: android.view.View): android.widget.TextView? {
+            if (view is android.widget.TextView && view.text.toString() == "字号预览") return view
+            if (view is android.view.ViewGroup) for (index in 0 until view.childCount) {
+                findPreview(view.getChildAt(index))?.let { return it }
+            }
+            return null
+        }
+        compose.setContent {
+            HarnessTheme(fontScale = scale.value) {
+                root = androidx.compose.ui.platform.LocalView.current.rootView
+                androidx.compose.foundation.layout.Column { Markdown("字号预览") }
+                ConnectionDialog(HarnessState(fontScale = scale.value), { _, _ -> }, {}, {}, fontScale = {
+                    store.fontScale = it
+                    scale.value = it
+                })
+            }
+        }
+        val original = compose.runOnIdle { checkNotNull(findPreview(root)).textSize }
+        compose.onNodeWithContentDescription("字体大小").performScrollTo().performSemanticsAction(SemanticsActions.SetProgress) { it(1.5f) }
+        compose.waitForIdle()
+        assertEquals(1.5f, SessionStore(context).fontScale)
+        val enlarged = compose.runOnIdle { checkNotNull(findPreview(root)).textSize }
+        // Android font scaling can be nonlinear; verify the native text actually becomes larger.
+        assertTrue("Native text grew from $original to $enlarged", enlarged > original)
+        compose.onNodeWithText("恢复默认").performScrollTo().performClick()
+        assertEquals(1f, SessionStore(context).fontScale)
     }
 }

@@ -5,6 +5,8 @@ import java.io.IOException
 import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.channels.Channel
@@ -16,9 +18,15 @@ import okhttp3.RequestBody.Companion.toRequestBody
 
 class HarnessException(val code: String, message: String) : IOException(message)
 
+// TLS close can write close_notify to the socket. Teardown and cancellation must never run
+// on an Android UI thread, including calls made by coroutine cancellation handlers.
+private val networkCleanup = Executors.newFixedThreadPool(2) { task ->
+    Thread(task, "harness-network-cleanup").apply { isDaemon = true }
+}
+
 /** Implements the real harness Connection RPC envelope and Gateway mux, not a model-provider API. */
-class HarnessClient(val address: ServerAddress, cookies: CookieJar) : Closeable {
-    private val http = OkHttpClient.Builder()
+class HarnessClient internal constructor(val address: ServerAddress, private val http: OkHttpClient) : Closeable {
+    constructor(address: ServerAddress, cookies: CookieJar) : this(address, OkHttpClient.Builder()
         .cookieJar(cookies)
         .followRedirects(false)
         .followSslRedirects(false)
@@ -27,7 +35,8 @@ class HarnessClient(val address: ServerAddress, cookies: CookieJar) : Closeable 
         .readTimeout(60, TimeUnit.SECONDS)
         .callTimeout(75, TimeUnit.SECONDS)
         .pingInterval(15, TimeUnit.SECONDS)
-        .build()
+        .build())
+    private val closed = AtomicBoolean(false)
     private val transferHttp = http.newBuilder().callTimeout(0, TimeUnit.SECONDS).writeTimeout(60, TimeUnit.SECONDS).build()
 
     suspend fun login(token: String) {
@@ -120,7 +129,11 @@ class HarnessClient(val address: ServerAddress, cookies: CookieJar) : Closeable 
     suspend fun listSessions(): JsonObject = rpc("session/list", jsonObject("_request" to emptyObject)).obj()
     fun mux(): HarnessMux = HarnessMux(http, request(address.base.newBuilder().addPathSegments("api/remote.mux").build()).build())
     private fun request(url: HttpUrl) = Request.Builder().url(url).header("Origin", address.origin).header("User-Agent", "HarnessAndroid/0.2")
-    override fun close() { http.dispatcher.cancelAll(); http.connectionPool.evictAll() }
+    override fun close() {
+        if (closed.compareAndSet(false, true)) networkCleanup.execute {
+            try { http.dispatcher.cancelAll() } finally { http.connectionPool.evictAll() }
+        }
+    }
 }
 
 class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
@@ -153,7 +166,12 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
         check(socket.send(openFrame(id, endpoint, args).toString())) { "连接已断开" }
     }
     fun cancel(id: String) { socket.send(jsonObject("type" to str("cancel"), "streamId" to str(id)).toString()) }
-    override fun close() { closed = true; socket.cancel(); frames.close() }
+    override fun close() {
+        if (closed) return
+        closed = true
+        frames.close()
+        networkCleanup.execute { socket.cancel() }
+    }
     companion object {
         fun openFrame(id: String, endpoint: String, args: JsonObject) = jsonObject(
             "type" to str("open"), "streamId" to str(id), "endpoint" to str(endpoint),
@@ -164,7 +182,7 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
 
 /** Read and decode the response on OkHttp's worker, keeping cancellation active through the entire body. */
 internal suspend fun <T> Call.readResponse(read: (Response) -> T): T = suspendCancellableCoroutine { continuation ->
-    continuation.invokeOnCancellation { cancel() }
+    continuation.invokeOnCancellation { networkCleanup.execute { cancel() } }
     enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) { if (continuation.isActive) continuation.resumeWithException(e) }
         override fun onResponse(call: Call, response: Response) {

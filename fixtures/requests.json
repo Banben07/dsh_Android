@@ -12,6 +12,8 @@
   {"endpoint":"session/modelCatalog","args":{}},
   {"endpoint":"session/control","args":{}},
   {"endpoint":"workspace/follow","args":{}},
+  {"endpoint":"workspace/archiveSession","args":{"request":{"sessionId":"android-test"}}},
+  {"endpoint":"workspace/unarchiveSession","args":{"request":{"sessionId":"android-test"}}},
   {"endpoint":"agentPresets/list","args":{}},
   {"endpoint":"commands/list","args":{"agentId":"android-test"}},
   {"endpoint":"commands/execute","args":{"agentId":"android-test","line":"/compact","submittedAttachments":[]}},

@@ -17,6 +17,7 @@ import okhttp3.CookieJar
 import okhttp3.HttpUrl
 
 data class SessionDefaults(val workspaceId: String? = null, val cwd: String = "", val preset: String? = null)
+fun normalizedFontScale(value: Float): Float = if (value.isFinite()) value.coerceIn(0.8f, 1.5f) else 1f
 
 /** Only authority-bound cookies are retained. Launch tokens never go to disk. */
 class SessionStore(context: Context) : CookieJar {
@@ -29,6 +30,12 @@ class SessionStore(context: Context) : CookieJar {
     var notifications: Boolean
         get() = prefs.getBoolean("completion-notifications", false)
         set(value) { prefs.edit().putBoolean("completion-notifications", value).apply() }
+    var keepBackgroundConnection: Boolean
+        get() = prefs.getBoolean("keep-background-connection", true)
+        set(value) { prefs.edit().putBoolean("keep-background-connection", value).apply() }
+    var fontScale: Float
+        get() = normalizedFontScale(prefs.getFloat("font-scale", 1f))
+        set(value) { prefs.edit().putFloat("font-scale", normalizedFontScale(value)).apply() }
     fun defaults(origin: String): SessionDefaults = runCatching {
         val j = parseObject(prefs.getString("defaults-${keyFor(origin)}", "{}").orEmpty())
         SessionDefaults(j.text("workspaceId").ifBlank { null }, j.text("cwd"), j.text("preset").ifBlank { null })

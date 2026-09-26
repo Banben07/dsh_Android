@@ -30,6 +30,9 @@ data class HarnessState(
     val commands: List<SlashCommand> = emptyList(), val commandsLoading: Boolean = false, val commandsError: String? = null,
     val commandResult: String? = null,
     val exporting: Boolean = false, val exportedBytes: Long = 0,
+    val archivingSessionId: String? = null,
+    val fontScale: Float = 1f,
+    val keepBackgroundConnection: Boolean = true,
 ) {
     val connected get() = connection == ConnectionStatus.CONNECTED
     val session get() = sessions.firstOrNull { it.id == selectedId }
@@ -38,7 +41,7 @@ data class HarnessState(
 
 class HarnessViewModel(application: Application) : AndroidViewModel(application) {
     private val store = SessionStore(application)
-    private val mutable = MutableStateFlow(HarnessState(server = store.server, showConnection = store.server.isBlank(), defaults = store.defaults(store.server), notifications = store.notifications))
+    private val mutable = MutableStateFlow(HarnessState(server = store.server, showConnection = store.server.isBlank(), defaults = store.defaults(store.server), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection))
     val state: StateFlow<HarnessState> = mutable.asStateFlow()
     private var client: HarnessClient? = null
     private var mux: HarnessMux? = null
@@ -59,6 +62,11 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     fun setDraft(text: String) { drafts[state.value.selectedId.orEmpty()] = text }
     fun clearError() { mutable.update { it.copy(error = null) } }
     fun settings() { mutable.update { it.copy(showConnection = true, error = null) } }
+    fun setFontScale(value: Float) {
+        val scale = normalizedFontScale(value)
+        store.fontScale = scale
+        mutable.update { it.copy(fontScale = scale) }
+    }
     fun testConnection(input: String) {
         if (state.value.diagnosing) return
         val address = try { ServerAddress.parse(input).copy(launchToken = null) } catch (e: Exception) { fail(e); return }
@@ -91,17 +99,23 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         stop()
         if (changed) { drafts.clear(); journal = SessionJournal(); restoreRecent = true }
         store.server = address.origin
-        mutable.update { if (changed) HarnessState(server = address.origin, showConnection = false, defaults = store.defaults(address.origin), notifications = store.notifications) else it.copy(showConnection = false, error = null, sending = false, sendingSessionId = null) }
+        mutable.update { if (changed) HarnessState(server = address.origin, showConnection = false, defaults = store.defaults(address.origin), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) else it.copy(showConnection = false, error = null, sending = false, sendingSessionId = null) }
         client = HarnessClient(address.copy(launchToken = null), store)
         start(address.launchToken)
     }
     fun resume() {
         pauseJob?.cancel()
-        if (connectionJob?.isActive == true || state.value.showConnection || state.value.server.isBlank()) return
+        if (connectionJob?.isActive == true) {
+            if (state.value.connected && store.keepBackgroundConnection && NotificationMonitor.appVisible) startBackgroundConnection()
+            return
+        }
+        if (state.value.showConnection || state.value.server.isBlank()) return
         if (client == null) client = HarnessClient(ServerAddress.parse(state.value.server), store)
         start(null)
     }
     fun pause() {
+        pauseJob?.cancel()
+        if (store.keepBackgroundConnection) return
         pauseJob = viewModelScope.launch {
             delay(8_000)
             connectionJob?.cancel(); mux?.close(); mux = null
@@ -111,12 +125,12 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     fun reconnect() { pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); start(null) }
     fun logout() {
         stop(); store.forgetCookies(); client = null
-        drafts.clear(); mutable.update { HarnessState(server = it.server, showConnection = true, defaults = store.defaults(it.server), notifications = store.notifications) }
+        drafts.clear(); mutable.update { HarnessState(server = it.server, showConnection = true, defaults = store.defaults(it.server), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) }
     }
     private fun stop(stopMonitor: Boolean = true) {
         sendJob?.cancel(); activeSendId = null
         exportJob?.cancel()
-        mutable.update { it.copy(exporting = false) }
+        mutable.update { it.copy(exporting = false, archivingSessionId = null) }
         if (stopMonitor) NotificationMonitor.stop(getApplication())
         epoch++; pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); mux = null
         client?.close(); clientId = null; followId = null
@@ -153,7 +167,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     restoreRecent = false
                     mutable.update { it.copy(connection = ConnectionStatus.CONNECTED, sessions = sessions,
                         selectedId = recent?.takeIf { id -> sessions.any { row -> row.id == id } }, pending = emptyList(), error = null) }
-                    if (store.notifications && NotificationMonitor.appVisible) startNotifications()
+                    if (store.keepBackgroundConnection && NotificationMonitor.appVisible) startBackgroundConnection()
                     active.open("control", "session/control")
                     active.open("workspaces", "workspace/follow")
                     state.value.selectedId?.let { follow(it) }
@@ -282,6 +296,23 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             "archived" -> mutable.update { it.copy(archived = v["archivedSessionIds"].array().map { it.string() }.toSet()) }
         }
     }
+    fun setArchived(sessionId: String, archived: Boolean) {
+        val api = client ?: return
+        if (!state.value.connected || state.value.archivingSessionId != null) return
+        mutable.update { it.copy(archivingSessionId = sessionId, error = null) }
+        viewModelScope.launch {
+            try {
+                val endpoint = if (archived) "workspace/archiveSession" else "workspace/unarchiveSession"
+                val value = api.command(endpoint, jsonObject("sessionId" to str(sessionId))).obj()
+                if (api === client) mutable.update { it.copy(archived = value["archivedSessionIds"].array().map { id -> id.string() }.toSet()) }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (api === client) mutable.update { it.copy(error = connectionFailureMessage(e, if (archived) "归档失败" else "取消归档失败")) }
+            } finally {
+                if (api === client) mutable.update { it.copy(archivingSessionId = null) }
+            }
+        }
+    }
     fun selectSession(id: String) {
         if (id == state.value.selectedId && journal.initialized) return
         mutable.update { it.copy(selectedId = id, messages = emptyList(), selectedModel = emptyObject, loading = true, hasMore = false, error = null, queued = false) }
@@ -378,15 +409,23 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     fun setNotifications(enabled: Boolean) {
         store.notifications = enabled
-        mutable.update { it.copy(notifications = enabled) }
-        if (enabled && state.value.connected) startNotifications()
-        else NotificationMonitor.stop(getApplication())
+        if (enabled) store.keepBackgroundConnection = true
+        mutable.update { it.copy(notifications = enabled, keepBackgroundConnection = store.keepBackgroundConnection) }
+        if (store.keepBackgroundConnection && state.value.connected) startBackgroundConnection()
     }
-    private fun startNotifications() {
+    fun setBackgroundConnection(enabled: Boolean) {
+        store.keepBackgroundConnection = enabled
+        if (!enabled) store.notifications = false
+        mutable.update { it.copy(keepBackgroundConnection = enabled, notifications = store.notifications) }
+        if (enabled && state.value.connected) startBackgroundConnection()
+        else if (!enabled) NotificationMonitor.stop(getApplication())
+    }
+    private fun startBackgroundConnection() {
         try { NotificationMonitor.start(getApplication()) }
         catch (_: RuntimeException) {
             store.notifications = false
-            mutable.update { it.copy(notifications = false, error = "系统暂时无法启动后台消息服务，请回到应用设置重新开启通知。") }
+            store.keepBackgroundConnection = false
+            mutable.update { it.copy(notifications = false, keepBackgroundConnection = false, error = "系统暂时无法启动后台消息服务，请回到应用设置重新开启后台保持连接。") }
         }
     }
     fun openNotification(server: String?, sessionId: String?) {

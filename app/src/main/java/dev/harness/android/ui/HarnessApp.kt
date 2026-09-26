@@ -99,20 +99,21 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
         }
         if (wide) {
             Row {
-                Sidebar(state, chooseSession, openNew, vm::refresh, vm::settings, Modifier.width(300.dp).fillMaxHeight())
+                Sidebar(state, chooseSession, openNew, vm::refresh, vm::settings, vm::setArchived, Modifier.width(300.dp).fillMaxHeight())
                 VerticalDivider()
                 Box(Modifier.weight(1f)) { chat() }
             }
         } else {
             ModalNavigationDrawer(drawerState = drawer, gesturesEnabled = !state.showConnection, drawerContent = {
                 ModalDrawerSheet(modifier = Modifier.width(320.dp), drawerContainerColor = MaterialTheme.colorScheme.surface) {
-                    Sidebar(state, chooseSession, openNew, vm::refresh, { scope.launch { drawer.close() }; vm.settings() }, Modifier.fillMaxSize())
+                    Sidebar(state, chooseSession, openNew, vm::refresh, { scope.launch { drawer.close() }; vm.settings() }, vm::setArchived, Modifier.fillMaxSize())
                 }
             }, content = chat)
         }
     }
     if (state.showConnection) ConnectionDialog(state, vm::connect, vm::closeSettings, vm::logout,
-        defaults = { editingDefaults = true }, notifications = vm::setNotifications, testConnection = vm::testConnection)
+        defaults = { editingDefaults = true }, notifications = vm::setNotifications, testConnection = vm::testConnection,
+        fontScale = vm::setFontScale, backgroundConnection = vm::setBackgroundConnection)
     if (editingDefaults) NewSessionDefaultsDialog(state, onDismiss = { editingDefaults = false }) { vm.saveDefaults(it); editingDefaults = false }
     if (choosingModel) ModelDialog(state, onDismiss = { choosingModel = false }) { model, effort -> vm.selectModel(model, effort); choosingModel = false }
     if (renaming) RenameDialog(state.session?.title.orEmpty(), { renaming = false }) { vm.rename(it); renaming = false }
@@ -123,7 +124,7 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
 }
 
 @Composable
-private fun Sidebar(state: HarnessState, select: (String) -> Unit, onNew: () -> Unit, onRefresh: () -> Unit, settings: () -> Unit, modifier: Modifier) {
+private fun Sidebar(state: HarnessState, select: (String) -> Unit, onNew: () -> Unit, onRefresh: () -> Unit, settings: () -> Unit, archive: (String, Boolean) -> Unit, modifier: Modifier) {
     var search by rememberSaveable { mutableStateOf("") }
     var workspace by rememberSaveable { mutableStateOf<String?>(null) }
     var showArchived by rememberSaveable { mutableStateOf(false) }
@@ -153,22 +154,42 @@ private fun Sidebar(state: HarnessState, select: (String) -> Unit, onNew: () -> 
         Text("会话  ${sessions.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 10.dp))
         LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             items(sessions, key = { it.id }) { session ->
-                val selected = session.id == state.selectedId
-                Surface(onClick = { select(session.id) }, color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(14.dp)) {
-                    Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(if (session.running) Icons.Default.PlayCircle else Icons.Default.ChatBubbleOutline, null, modifier = Modifier.size(19.dp), tint = if (selected || session.running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
-                            if (session.cwd.isNotBlank()) Text(session.cwd.substringAfterLast('/').ifBlank { session.cwd }, maxLines = 1, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
+                SessionListItem(session, session.id == state.selectedId, session.id in state.archived,
+                    canArchive = state.connected && state.archivingSessionId == null, busy = state.archivingSessionId == session.id,
+                    onOpen = { select(session.id) }, onArchive = { archive(session.id, it) })
             }
             if (sessions.isEmpty()) item { Text(if (search.isNotBlank()) "没有匹配的会话" else "会话会出现在这里", modifier = Modifier.padding(14.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
         HorizontalDivider()
         TextButton(onClick = settings, modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 10.dp)) { Icon(Icons.Default.Settings, null, Modifier.size(18.dp)); Spacer(Modifier.width(10.dp)); Text("设置") }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun SessionListItem(session: SessionSummary, selected: Boolean, archived: Boolean, canArchive: Boolean, busy: Boolean,
+    onOpen: () -> Unit, onArchive: (Boolean) -> Unit) {
+    var menu by remember(session.id) { mutableStateOf(false) }
+    val action = if (archived) "取消归档" else "归档会话"
+    Box {
+        Surface(color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(14.dp)) {
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).combinedClickable(
+                onClickLabel = "打开会话", onClick = onOpen, onLongClickLabel = "会话操作", onLongClick = { menu = true },
+            ).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (busy) CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp)
+                else Icon(if (session.running) Icons.Default.PlayCircle else Icons.Default.ChatBubbleOutline, null, modifier = Modifier.size(19.dp), tint = if (selected || session.running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                    if (session.cwd.isNotBlank()) Text(session.cwd.substringAfterLast('/').ifBlank { session.cwd }, maxLines = 1, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        DropdownMenu(menu, { menu = false }) {
+            DropdownMenuItem(text = { Text(action) }, enabled = canArchive,
+                leadingIcon = { Icon(if (archived) Icons.Default.Unarchive else Icons.Default.Archive, null) },
+                onClick = { menu = false; onArchive(!archived) })
+        }
     }
 }
 

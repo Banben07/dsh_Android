@@ -10,6 +10,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -23,8 +25,8 @@ class MainActivity : ComponentActivity() {
         model.openNotification(intent.getStringExtra("server"), intent.getStringExtra("sessionId"))
         enableEdgeToEdge()
         setContent {
-            HarnessTheme {
-                val state by model.state.collectAsStateWithLifecycle()
+            val state by model.state.collectAsStateWithLifecycle()
+            HarnessTheme(fontScale = state.fontScale) {
                 val lifecycle = LocalLifecycleOwner.current.lifecycle
                 DisposableEffect(lifecycle) {
                     val observer = LifecycleEventObserver { _, event ->
@@ -52,7 +54,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun HarnessTheme(content: @Composable () -> Unit) {
+fun HarnessTheme(fontScale: Float = 1f, content: @Composable () -> Unit) {
+    val density = LocalDensity.current
+    val scaledDensity = remember(density, fontScale) {
+        if (fontScale == 1f) density else Density(density.density, density.fontScale * normalizedFontScale(fontScale))
+    }
     val colors = if (isSystemInDarkTheme()) darkColorScheme(
         primary = Color(0xFFAEBFFF), onPrimary = Color(0xFF142970),
         primaryContainer = Color(0xFF263D89), secondary = Color(0xFF90D9CD),
@@ -66,5 +72,7 @@ fun HarnessTheme(content: @Composable () -> Unit) {
         surfaceVariant = Color(0xFFF0F2F8), outlineVariant = Color(0xFFE2E6F0),
         onSurface = Color(0xFF202638), onSurfaceVariant = Color(0xFF69738B),
     )
-    MaterialTheme(colorScheme = colors, typography = Typography(), content = content)
+    CompositionLocalProvider(LocalDensity provides scaledDensity) {
+        MaterialTheme(colorScheme = colors, typography = Typography(), content = content)
+    }
 }

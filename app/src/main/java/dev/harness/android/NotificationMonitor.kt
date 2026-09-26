@@ -11,7 +11,7 @@ import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import java.util.UUID
 
-/** User-enabled foreground connection for private-server message completion events. */
+/** Foreground service keeps the process available for session sockets and optional completion events. */
 class NotificationMonitor : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var job: Job? = null
@@ -28,7 +28,7 @@ class NotificationMonitor : Service() {
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val store = SessionStore(this)
-        if (!store.notifications || store.server.isBlank()) { stopSelf(); return START_NOT_STICKY }
+        if (!store.keepBackgroundConnection || store.server.isBlank()) { stopSelf(); return START_NOT_STICKY }
         if (job?.isActive == true && origin == store.server) return START_STICKY
         job?.cancel(); origin = store.server
         job = scope.launch { monitor(store.server, store) }
@@ -56,6 +56,7 @@ class NotificationMonitor : Service() {
                         val clientId = ready.text("clientId")
                         val pending = mutableMapOf<String, String>()
                         fun inspect(id: String) {
+                            if (!store.notifications) return
                             if (id in pending.values) return
                             val stream = "notice-${UUID.randomUUID()}"; pending[stream] = id
                             mux.open(stream, "session/follow", jsonObject("request" to jsonObject(
@@ -65,7 +66,7 @@ class NotificationMonitor : Service() {
                         val sessions = api.listSessions()["items"].array().map { SessionSummary.parse(it.obj()) }
                         titles = sessions.filterNot { it.isChild }.associate { it.id to it.title }
                         tracker.baseline(sessions).forEach(::inspect)
-                        manager.notify(ONGOING_ID, connectionNotification("后台接收回复完成提醒"))
+                        manager.notify(ONGOING_ID, connectionNotification("后台保持与服务器连接"))
                         for (frame in mux.frames) {
                             val stream = frame.text("streamId")
                             if (frame.text("type") in listOf("error", "end")) {
@@ -95,7 +96,7 @@ class NotificationMonitor : Service() {
                                 val reply = completedReply(v) ?: continue
                                 if (reply.seq <= store.notificationSeq(server, id)) continue
                                 store.rememberNotification(server, id, reply.seq)
-                                if (!appVisible && manager.areNotificationsEnabled()) {
+                                if (store.notifications && !appVisible && manager.areNotificationsEnabled()) {
                                     val title = v["projections"].obj()["values"].obj().text("title").ifBlank { titles[id] ?: "会话" }
                                     val notice = Notification.Builder(this@NotificationMonitor, REPLY_CHANNEL)
                                         .setSmallIcon(dev.harness.android.R.drawable.ic_deepseek).setContentTitle("回复完成 · $title")

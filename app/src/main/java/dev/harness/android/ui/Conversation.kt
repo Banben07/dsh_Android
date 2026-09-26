@@ -15,9 +15,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.harness.android.HarnessState
 import dev.harness.android.HarnessViewModel
@@ -30,12 +32,36 @@ import io.noties.markwon.ext.tables.TablePlugin
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
+internal data class ConversationContent(val messages: List<DisplayMessage>, val activity: List<DisplayMessage>)
+
+private val DisplayMessage.isActivity get() = kind == "tool" || kind == "reasoning"
+
+/** Share one history group across reasoning and tools, keeping answer text in the conversation. */
+internal fun conversationContent(messages: List<DisplayMessage>): ConversationContent {
+    val entries = buildList {
+        messages.forEachIndexed { index, message ->
+            if (message.kind == "assistant") {
+                val streamingTool = messages.getOrNull(index + 1)?.let { it.kind == "tool" && it.streaming } == true
+                if (message.reasoning.isNotBlank()) add(message.copy(
+                    key = "reasoning-${message.key}", kind = "reasoning", text = message.reasoning, reasoning = "",
+                    streaming = message.streaming && message.text.isBlank() && !streamingTool,
+                ))
+                // A reasoning-only message belongs entirely in the activity group, without an empty answer row.
+                if (message.text.isNotBlank() || message.interrupted ||
+                    (message.streaming && message.reasoning.isBlank() && !streamingTool)) add(message.copy(reasoning = ""))
+            } else add(message)
+        }
+    }
+    val activity = entries.filter { it.isActivity }
+    val latest = activity.lastOrNull()?.key
+    return ConversationContent(entries.filter { !it.isActivity || it.key == latest }, activity)
+}
+
 @Composable
 fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) {
     key(state.server, state.selectedId) {
-        val tools = state.messages.filter { it.kind == "tool" }
-        val latestTool = tools.lastOrNull()?.key
-        val messages = state.messages.filter { it.kind != "tool" || it.key == latestTool }
+        val content = remember(state.messages) { conversationContent(state.messages) }
+        val messages = content.messages
         val list = rememberLazyListState()
         val scope = rememberCoroutineScope()
         var following by remember { mutableStateOf(true) }
@@ -58,9 +84,9 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
                         }
                     }
                 }
-                items(messages, key = { if (it.kind == "tool") "tool-activity" else it.key }) { message ->
+                items(messages, key = { if (it.isActivity) "session-activity" else it.key }) { message ->
                     Box(Modifier.fillMaxWidth(), contentAlignment = if (message.kind == "user") Alignment.CenterEnd else Alignment.CenterStart) {
-                        if (message.kind == "tool") ToolActivity(tools, Modifier.widthIn(max = 740.dp))
+                        if (message.isActivity) SessionActivity(content.activity, Modifier.widthIn(max = 740.dp))
                         else MessageCard(message, Modifier.widthIn(max = 740.dp), loadImage = { attachmentId -> vm.readImage(state.selectedId.orEmpty(), attachmentId) })
                     }
                 }
@@ -90,20 +116,7 @@ fun MessageCard(message: DisplayMessage, modifier: Modifier = Modifier, loadImag
         "assistant" -> Column(modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BrandMark(25); Spacer(Modifier.width(9.dp)); Text("Harness", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                if (message.streaming) { Spacer(Modifier.width(10.dp)); Text("正在思考与回复", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall) }
-            }
-            if (message.reasoning.isNotBlank()) {
-                var expanded by rememberSaveable(message.key) { mutableStateOf(false) }
-                Surface(Modifier.fillMaxWidth().padding(top = 12.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                    Column(Modifier.padding(12.dp)) {
-                        Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Psychology, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.width(8.dp)); Text("思考过程", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-                            Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (expanded) "收起思考过程" else "展开思考过程", Modifier.size(18.dp))
-                        }
-                        if (expanded) SelectionContainer { Text(message.reasoning, Modifier.padding(top = 10.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    }
-                }
+                if (message.streaming) { Spacer(Modifier.width(10.dp)); Text("正在生成回复", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall) }
             }
             if (message.text.isNotEmpty()) Markdown(message.text, Modifier.fillMaxWidth().padding(top = 12.dp))
             if (message.interrupted) Text("回复已中断", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 8.dp))
@@ -128,23 +141,48 @@ fun MessageCard(message: DisplayMessage, modifier: Modifier = Modifier, loadImag
 }
 
 @Composable
-fun ToolActivity(tools: List<DisplayMessage>, modifier: Modifier = Modifier) {
-    val latest = tools.lastOrNull() ?: return
+fun SessionActivity(activity: List<DisplayMessage>, modifier: Modifier = Modifier) {
+    val latest = activity.lastOrNull() ?: return
     var expanded by rememberSaveable { mutableStateOf(false) }
     var visibleCount by rememberSaveable { mutableIntStateOf(20) }
     Column(modifier.fillMaxWidth()) {
-        Text("最新工具调用", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
-        ToolCard(latest, Modifier.fillMaxWidth())
-        if (tools.size > 1) {
+        Text("思考与工具", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
+        ActivityCard(latest, Modifier.fillMaxWidth())
+        if (activity.size > 1) {
             TextButton(onClick = { expanded = !expanded }) {
                 Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp)); Text("${if (expanded) "收起" else "展开"}历史工具调用（${tools.size - 1}）", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.width(6.dp)); Text("${if (expanded) "收起" else "展开"}历史过程（${activity.size - 1}）", style = MaterialTheme.typography.labelMedium)
             }
             if (expanded) {
-                tools.dropLast(1).asReversed().take(visibleCount).forEach { tool ->
-                    key(tool.key) { Box(Modifier.padding(top = 6.dp)) { ToolCard(tool, Modifier.fillMaxWidth()) } }
+                activity.dropLast(1).asReversed().take(visibleCount).forEach { item ->
+                    key(item.key) { Box(Modifier.padding(top = 6.dp)) { ActivityCard(item, Modifier.fillMaxWidth()) } }
                 }
-                if (tools.size - 1 > visibleCount) TextButton(onClick = { visibleCount += 20 }) { Text("查看更多历史调用") }
+                if (activity.size - 1 > visibleCount) TextButton(onClick = { visibleCount += 20 }) { Text("查看更多历史过程") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivityCard(message: DisplayMessage, modifier: Modifier) {
+    if (message.kind == "tool") ToolCard(message, modifier)
+    else {
+        var expanded by rememberSaveable(message.key) { mutableStateOf(false) }
+        Surface(modifier, shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+            Column {
+                Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Psychology, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.secondary)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("思考过程", style = MaterialTheme.typography.labelLarge)
+                        Text(if (message.interrupted) "已中断" else if (message.streaming) "正在思考" else "已完成", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (expanded) "收起思考过程" else "展开思考过程", Modifier.size(20.dp))
+                }
+                if (expanded) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    SelectionContainer { Text(message.text, Modifier.padding(14.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
             }
         }
     }
@@ -199,14 +237,17 @@ fun Markdown(text: String, modifier: Modifier = Modifier) {
     val foreground = MaterialTheme.colorScheme.onSurface.toArgb()
     val primary = MaterialTheme.colorScheme.primary.toArgb()
     val code = MaterialTheme.colorScheme.surfaceVariant.toArgb()
+    val textSizePx = with(LocalDensity.current) { 16.sp.toPx() }
+    val lineSpacingPx = with(LocalDensity.current) { 5.sp.toPx() }
     AndroidView(modifier = modifier, factory = { context ->
         TextView(context).apply {
-            textSize = 16f; setTextIsSelectable(true); movementMethod = LinkMovementMethod.getInstance()
-            setLineSpacing(5f * resources.displayMetrics.density, 1f)
+            setTextIsSelectable(true); movementMethod = LinkMovementMethod.getInstance()
         }
     }, update = { view ->
         view.setTextColor(foreground); view.setLinkTextColor(primary)
-        val styleKey = "$foreground:$primary:$code"
+        view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, textSizePx)
+        view.setLineSpacing(lineSpacingPx, 1f)
+        val styleKey = "$foreground:$primary:$code:$textSizePx"
         val cached = view.tag as? MarkdownBinding
         val markwon = if (cached?.style == styleKey) cached.renderer else Markwon.builder(view.context)
             .usePlugin(TablePlugin.create(view.context))

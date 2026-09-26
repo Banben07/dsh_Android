@@ -69,4 +69,4 @@ jobs:
           gh release create "$BUILD_TAG" apk/app-debug.apk \
             --target "$BUILD_SHA" --prerelease \
             --title "DeepSeek Harness · build ${{ github.run_number }}" \
-            --notes "Native Android development build. Requires Android 8.0+ and a reachable DeepSeek harness HTTP/HTTPS server. Includes native file uploads, slash commands, tool history folding, completion notifications and connection diagnostics. Protocol/UI tests and Android lint must pass before publication."
+            --notes "Native Android development build. Requires Android 8.0+ and a reachable DeepSeek harness HTTP/HTTPS server. Includes merged thinking/tool history, long-press session archiving, adjustable fonts, background connections and a fix for the Android TLS shutdown crash. Protocol/UI tests and Android lint must pass before publication."

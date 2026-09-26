@@ -22,13 +22,16 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import dev.harness.android.*
 import dev.harness.core.*
 import kotlinx.serialization.json.*
 
 @Composable
 fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dismiss: () -> Unit, logout: () -> Unit,
-    defaults: (() -> Unit)? = null, notifications: ((Boolean) -> Unit)? = null, testConnection: ((String) -> Unit)? = null) {
+    defaults: (() -> Unit)? = null, notifications: ((Boolean) -> Unit)? = null, testConnection: ((String) -> Unit)? = null,
+    fontScale: ((Float) -> Unit)? = null, backgroundConnection: ((Boolean) -> Unit)? = null) {
     var server by remember { mutableStateOf(state.server) }
     var token by remember { mutableStateOf("") } // Intentionally not saveable: never persist a launch token.
     var visible by remember { mutableStateOf(false) }
@@ -54,15 +57,36 @@ fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dis
                 state.diagnostics?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 Button(onClick = { connect(server, token); token = "" }, modifier = Modifier.fillMaxWidth().height(50.dp), enabled = server.isNotBlank(), shape = RoundedCornerShape(14.dp)) { Icon(Icons.Default.Link, null, Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text("连接服务") }
                 Text("连接 Cookie 使用 Android Keystore 加密保存在本机。模型与工具继续在你的服务器上运行。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (fontScale != null) {
+                    HorizontalDivider()
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("字体大小 · ${kotlin.math.round(state.fontScale * 100).toInt()}%", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                            TextButton(onClick = { fontScale(1f) }, enabled = state.fontScale != 1f) { Text("恢复默认") }
+                        }
+                        Slider(value = state.fontScale, onValueChange = { fontScale(kotlin.math.round(it * 10) / 10) }, valueRange = 0.8f..1.5f, steps = 6,
+                            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "字体大小" })
+                        Text("即时生效，100% 跟随系统字体大小。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
                 if (defaults != null) {
                     HorizontalDivider()
                     TextButton(onClick = defaults, enabled = state.connected) { Icon(Icons.Default.CreateNewFolder, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("新对话默认设置") }
+                }
+                if (backgroundConnection != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("后台保持连接", style = MaterialTheme.typography.bodyMedium)
+                            Text("切换应用后继续同步，会显示后台连接通知。关闭后也会关闭回复提醒。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(state.keepBackgroundConnection, backgroundConnection)
+                    }
                 }
                 if (notifications != null) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("回复完成通知", style = MaterialTheme.typography.bodyMedium)
-                            Text("后台保持连接，点击提醒返回会话。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("开启时同时保持后台连接，点击提醒返回会话。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(state.notifications, { enabled ->
                             if (enabled && Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)

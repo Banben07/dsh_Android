@@ -10,8 +10,8 @@ android {
         applicationId = "dev.harness.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true }
@@ -48,4 +48,5 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("androidx.test:core:1.6.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
