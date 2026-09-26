@@ -287,7 +287,16 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         mutable.update { it.copy(selectedId = id, messages = emptyList(), selectedModel = emptyObject, loading = true, hasMore = false, error = null, queued = false) }
         store.remember(state.value.server, id)
         journal = SessionJournal()
-        if (state.value.connected) follow(id)
+        if (state.value.connected) {
+            try { follow(id) }
+            catch (e: Exception) {
+                // The socket can close between a tap and send(). Keep this UI callback from
+                // throwing on the main thread; reconnect will follow the selected session again.
+                if (e is CancellationException) throw e
+                mutable.update { it.copy(loading = false) }
+                reconnect()
+            }
+        }
     }
     private fun follow(id: String) {
         followId?.let { mux?.cancel(it) }
