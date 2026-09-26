@@ -17,12 +17,14 @@ class SessionJournal {
     private var startedAfter = -1L
     private var nextIndex = 0L
     private val blocks = sortedMapOf<Long, JsonObject>()
+    private var cachedMessages: List<DisplayMessage>? = null
     val firstSeq: Long? get() = events.keys.firstOrNull()
     fun hasPrompt(requestId: String) = events.values.any { it.text("type") == "user/message" && it["data"].obj()["source"].obj().text("rpcId") == requestId }
 
     fun accept(value: JsonObject) {
         when (value.text("type")) {
             "snapshot" -> {
+                cachedMessages = null
                 events.clear(); blocks.clear(); attempt = ""
                 cursor = value.long("cursor", -1)
                 header = value["header"].obj()
@@ -45,11 +47,12 @@ class SessionJournal {
                 if (seq <= cursor) return
                 if (seq != cursor + 1) throw HarnessException("journal/gap", "历史事件不连续，正在重新同步")
                 events[seq] = event; cursor = seq
+                cachedMessages = null
             }
             "assistant-stream" -> acceptAssistant(value["frame"].obj())
         }
     }
-    fun prepend(page: JsonObject) { addRecords(page["records"].array()); hasMore = page.flag("hasMore") }
+    fun prepend(page: JsonObject) { addRecords(page["records"].array()); hasMore = page.flag("hasMore"); cachedMessages = null }
     private fun addRecords(records: JsonArray) {
         records.forEach { record ->
             val event = record.obj()["event"].obj()
@@ -64,6 +67,7 @@ class SessionJournal {
         revision = rev
         when (frame.text("type")) {
             "start" -> {
+                cachedMessages = null
                 if (attempt.isNotEmpty()) throw HarnessException("stream/gap", "上一段回复尚未结束，正在重新同步")
                 attempt = frame.text("attemptId"); nextIndex = 0; blocks.clear()
                 attemptTurn = frame.long("turn"); attemptStep = frame.long("step"); startedAfter = frame.long("startedAfterSeq", cursor)
@@ -83,6 +87,7 @@ class SessionJournal {
                     throw HarnessException("stream/gap", "回复历史尚未同步，正在重新读取")
                 }
                 attempt = ""; blocks.clear()
+                cachedMessages = null
             }
         }
     }
@@ -114,11 +119,28 @@ class SessionJournal {
         }
     }
     fun messages(): List<DisplayMessage> {
+        val result = (cachedMessages ?: durableMessages().also { cachedMessages = it }).toMutableList()
+        if (attempt.isNotEmpty()) {
+            val content = JsonArray(blocks.values.toList())
+            result += DisplayMessage("live-$attempt", "assistant", blockText(content),
+                blocks.values.filter { it.text("type") == "reasoning" }.joinToString("\n") { it.text("text") }, streaming = true)
+            blocks.values.filter { it.text("type") == "tool-call" }.forEach { block ->
+                result += DisplayMessage("live-tool-${block.text("id")}", "tool", name = block.text("name"), arguments = block.text("arguments"), streaming = true, callId = block.text("id"))
+            }
+        }
+        return result
+    }
+    private fun durableMessages(): List<DisplayMessage> {
         val result = mutableListOf<DisplayMessage>()
         val toolIndices = mutableMapOf<String, Int>()
         // The journal is an audit timeline: replacements remain visible with a clear context marker.
         events.values.forEach { e ->
             val data = e["data"].obj(); val key = "event-${e.long("seq")}"; val type = e.text("type")
+            if (e["surfaceOp"].obj().text("op") == "replace") {
+                val content = if (type == "user/message") data["content"] else data["message"].obj()["content"]
+                result += DisplayMessage("$key-context", "context", "服务端整理后的上下文：\n" + blockText(content))
+                return@forEach
+            }
             when (type) {
                 "user/message" -> {
                     val source = data["source"].obj()
@@ -133,7 +155,7 @@ class SessionJournal {
                 }
                 "tool/call" -> {
                     toolIndices[data.text("callId")] = result.size
-                    result += DisplayMessage(key, "tool", name = data.text("name"), arguments = data.text("arguments"))
+                    result += DisplayMessage(key, "tool", name = data.text("name"), arguments = data.text("arguments"), callId = data.text("callId"))
                 }
                 "tool/result" -> {
                     val block = data["message"].obj()["content"].array().firstOrNull().obj()
@@ -155,14 +177,6 @@ class SessionJournal {
                         "max-tokens" -> result += DisplayMessage(key, "notice", "回复达到输出长度上限")
                     }
                 }
-            }
-        }
-        if (attempt.isNotEmpty()) {
-            val content = JsonArray(blocks.values.toList())
-            result += DisplayMessage("live-$attempt", "assistant", blockText(content),
-                blocks.values.filter { it.text("type") == "reasoning" }.joinToString("\n") { it.text("text") }, streaming = true)
-            blocks.values.filter { it.text("type") == "tool-call" }.forEach { block ->
-                result += DisplayMessage("live-tool-${block.text("id")}", "tool", name = block.text("name"), arguments = block.text("arguments"), streaming = true)
             }
         }
         return result

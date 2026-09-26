@@ -25,6 +25,7 @@ data class DisplayMessage(
     val key: String, val kind: String, val text: String = "", val reasoning: String = "",
     val name: String = "", val arguments: String = "", val result: String? = null,
     val isError: Boolean = false, val streaming: Boolean = false, val interrupted: Boolean = false,
+    val callId: String = "",
 )
 
 fun blockText(blocks: JsonElement?): String = blocks.array().mapNotNull { raw ->

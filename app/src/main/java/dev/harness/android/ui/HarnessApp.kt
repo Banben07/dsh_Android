@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -73,7 +74,10 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
                     if (state.pending.isNotEmpty()) {
                         val pending = state.pending.firstOrNull { it.agentId == state.selectedId } ?: state.pending.first()
                         Surface(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.secondaryContainer,
-                            onClick = { questionId = pending.eventId }) {
+                            onClick = {
+                                if (pending.agentId != state.selectedId && state.sessions.any { it.id == pending.agentId && !it.isChild }) vm.selectSession(pending.agentId)
+                                questionId = pending.eventId
+                            }) {
                             Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Default.FrontHand, null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(20.dp))
                                 Spacer(Modifier.width(10.dp))
@@ -224,7 +228,7 @@ private fun Composer(state: HarnessState, vm: HarnessViewModel, onModel: () -> U
                         }
                         Spacer(Modifier.weight(1f))
                         if (state.session?.running == true) {
-                            IconToggleButton(steer, { steer = it }, enabled = state.connected) { Icon(Icons.Default.AltRoute, if (steer) "当前为引导模式，点击切换排队" else "当前为排队模式，点击切换引导", Modifier.size(19.dp)) }
+                            IconToggleButton(steer, { steer = it }, enabled = state.connected) { Icon(Icons.AutoMirrored.Filled.AltRoute, if (steer) "当前为引导模式，点击切换排队" else "当前为排队模式，点击切换引导", Modifier.size(19.dp)) }
                             IconButton(onClick = vm::cancelTurn, enabled = state.connected) { Icon(Icons.Default.StopCircle, "停止当前执行", tint = MaterialTheme.colorScheme.error) }
                         }
                         FilledIconButton(onClick = {

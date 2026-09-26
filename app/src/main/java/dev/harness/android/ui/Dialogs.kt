@@ -118,6 +118,11 @@ fun QuestionDialog(pending: PendingQuestion, state: HarnessState, onDismiss: () 
                 if (approval) {
                     Text(pending.request.text("toolName"), fontWeight = FontWeight.SemiBold)
                     Markdown(pending.request.text("reason").ifBlank { "此工具请求执行需要你授权的操作。" })
+                    val callId = pending.request.text("callId")
+                    state.messages.firstOrNull { callId.isNotEmpty() && it.callId == callId }?.let { tool ->
+                        Text("本次调用参数", style = MaterialTheme.typography.labelSmall)
+                        CodeText(remember(tool.arguments) { runCatching { pretty(wireJson.parseToJsonElement(tool.arguments)) }.getOrDefault(tool.arguments) })
+                    }
                     Text("允许只对这一次请求生效。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else questions.forEach { q ->
                     val id = q.text("id"); val multiple = q.flag("multiSelect")

@@ -155,6 +155,8 @@ fun CodeText(text: String) {
     }
 }
 
+private data class MarkdownBinding(val style: String, val renderer: Markwon, val text: String)
+
 /** Native Android TextView with Markwon spans. No HTML document, browser engine or WebView. */
 @Composable
 fun Markdown(text: String, modifier: Modifier = Modifier) {
@@ -169,16 +171,18 @@ fun Markdown(text: String, modifier: Modifier = Modifier) {
     }, update = { view ->
         view.setTextColor(foreground); view.setLinkTextColor(primary)
         val styleKey = "$foreground:$primary:$code"
-        @Suppress("UNCHECKED_CAST")
-        val cached = view.tag as? Pair<String, Markwon>
-        val markwon = if (cached?.first == styleKey) cached.second else Markwon.builder(view.context)
+        val cached = view.tag as? MarkdownBinding
+        val markwon = if (cached?.style == styleKey) cached.renderer else Markwon.builder(view.context)
             .usePlugin(TablePlugin.create(view.context))
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(object : AbstractMarkwonPlugin() {
                 override fun configureTheme(builder: MarkwonTheme.Builder) {
                     builder.codeBackgroundColor(code).codeTextColor(foreground).linkColor(primary)
                 }
-            }).build().also { view.tag = styleKey to it }
-        markwon.setMarkdown(view, text)
+            }).build()
+        if (cached?.style != styleKey || cached.text != text) {
+            markwon.setMarkdown(view, text)
+            view.tag = MarkdownBinding(styleKey, markwon, text)
+        }
     })
 }
