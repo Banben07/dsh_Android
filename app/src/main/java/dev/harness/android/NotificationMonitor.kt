@@ -74,7 +74,8 @@ class NotificationMonitor : Service() {
                             val stream = "notice-${UUID.randomUUID()}"; pending[stream] = id
                             mux.open(stream, "session/follow", jsonObject("request" to jsonObject(
                                 "address" to jsonObject("kind" to str("session"), "sessionId" to str(id)),
-                                "maxMessages" to JsonPrimitive(5), "assistantStream" to JsonPrimitive(false))))
+                                // The follow schema only accepts `assistantStream: true`; omit it rather than send false.
+                                "maxMessages" to JsonPrimitive(5))))
                         }
                         val sessions = api.listSessions()["items"].array().map { SessionSummary.parse(it.obj()) }
                         titles = sessions.filterNot { it.isChild }.associate { it.id to it.title }
@@ -85,7 +86,8 @@ class NotificationMonitor : Service() {
                             val stream = frame.text("streamId")
                             if (frame.text("type") in listOf("error", "end")) {
                                 if (stream == "events") throw HarnessException("stream/closed", "消息连接已结束")
-                                pending.remove(stream); continue
+                                if (pending.remove(stream) != null) ConnectionLog.record(this@NotificationMonitor, "读取回复失败：${frame.text("type")} ${frame["error"].obj().text("code")} ${frame["error"].obj().text("message")}")
+                                continue
                             }
                             if (frame.text("type") != "item") continue
                             val v = frame["value"].obj()

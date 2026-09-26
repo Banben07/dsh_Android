@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.*
 import okhttp3.mockwebserver.*
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -163,7 +164,10 @@ class SessionNavigationTest {
                             val frame = parseObject(text)
                             when (frame.text("endpoint")) {
                                 "\$events" -> webSocket.send("""{"type":"item","streamId":"events","value":{"type":"ready","clientId":"test-client"}}""")
-                                "session/follow" -> Follow(frame.text("streamId"), frame["payload"].obj()["args"].obj()["request"].obj()["address"].obj().text("sessionId"), webSocket)
+                                "session/follow" -> if (frame["payload"].obj()["args"].obj()["request"].obj()["assistantStream"] == JsonPrimitive(false)) {
+                                    // Harness validates `assistantStream` as z.literal(true).optional().
+                                    webSocket.send("""{"type":"error","streamId":"${frame.text("streamId")}","error":{"code":"gateway/arguments-invalid","message":"assistantStream"}}""")
+                                } else Follow(frame.text("streamId"), frame["payload"].obj()["args"].obj()["request"].obj()["address"].obj().text("sessionId"), webSocket)
                                     .let { if (it.streamId.startsWith("prefetch-")) prefetches.add(it) else follows.add(it) }
                             }
                         }

@@ -280,13 +280,15 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                 val streamId = "prefetch-${UUID.randomUUID()}"
                 prefetching[streamId] = session.id
                 active.open(streamId, "session/follow", jsonObject("request" to jsonObject(
-                    "address" to address(session.id), "maxMessages" to JsonPrimitive(INITIAL_MESSAGES), "assistantStream" to JsonPrimitive(false))))
+                    // The follow schema only accepts `assistantStream: true`; omit it rather than send false.
+                    "address" to address(session.id), "maxMessages" to JsonPrimitive(INITIAL_MESSAGES))))
             }
     }
     private suspend fun prefetched(stream: String, frame: JsonObject) {
         val id = prefetching.remove(stream) ?: return
         mux?.cancel(stream)
         val v = frame["value"].obj()
+        if (frame.text("type") == "error") log("预取会话失败：${frame["error"].obj().text("code")} ${frame["error"].obj().text("message")}")
         if (frame.text("type") != "item" || v.text("type") != "snapshot") return
         val next = SessionJournal()
         val messages = withContext(Dispatchers.Default) { next.accept(v); next.messages() }
