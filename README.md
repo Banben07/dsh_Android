@@ -2,17 +2,21 @@
 
 DeepSeek harness 的原生安卓客户端。Kotlin + Jetpack Compose 实现界面，OkHttp 连接你已有的 harness 服务。Markdown 使用原生 TextView 渲染，没有 WebView、Electron 或内嵌网页。
 
-**Android 8.0 及以上。** 手机连接 Tailscale 后，直接使用服务器的 `IP:端口` 或 HTTPS/MagicDNS 地址。
+**Android 8.0 及以上。** 使用手机可以访问的服务器 `IP:端口` 或 HTTP/HTTPS 域名，支持局域网、公网及 ZeroTier、Tailscale 等网络。
 
 ## 下载与连接
 
 1. 打开 [Releases](https://github.com/Banben07/dsh_Android/releases)，下载最新开发预览中的 `app-debug.apk` 并安装。
-2. 在手机 Tailscale 中登录与你的服务器相同的网络，确认可以访问服务器。
-3. 启动 Harness，填写例如 `http://100.80.20.10:3000`。
-4. 首次连接需要 harness 启动时输出的登录 `token`。可以分别填写地址与 Token，或粘贴完整的 `http://IP:端口/?token=…` 链接。如果启动链接使用 `127.0.0.1`，请先把主机部分换成你的 Tailscale 地址，保留端口与 token。
+2. 确认手机能够访问服务器；使用局域网时连接相应网络，使用 VPN 时按需连接 VPN。
+3. 启动 Harness，填写例如 `http://192.168.1.10:3000` 或 `https://harness.example.com`。不带协议的 `IP:端口` 默认使用 HTTP。
+4. 首次连接需要 harness 启动时输出的登录 `token`。可以分别填写地址与 Token，或粘贴完整的 `http://IP:端口/?token=…` 链接。如果启动链接使用 `127.0.0.1`，请换成手机实际可访问的服务器地址，保留 token。
 5. 打开已有会话，或选择工作空间和代理预设创建新会话。
 
-这里填写的是 **harness 的登录 Token**，不是 DeepSeek API Key。模型凭据、工具和工作文件继续由服务器管理。连接地址保存在本机；登录 Cookie 按地址隔离，使用 Android Keystore 加密；启动 Token 不保存。应用不包含 Tailscale VPN，实现联网的是手机上独立安装的 Tailscale。
+使用 ZeroTier 时，手机连接与服务器互通的 ZeroTier 网络，服务地址填写服务器的 ZeroTier IP 和 harness 端口，例如 `http://10.147.17.10:3000`。客户端无需额外配置 VPN 协议。
+
+这里填写的是 **harness 的登录 Token**，不是 DeepSeek API Key。模型凭据、工具和工作文件继续由服务器管理。连接地址保存在本机；登录 Cookie 按地址隔离，使用 Android Keystore 加密；启动 Token 不保存。应用直接使用手机当前的网络连接。
+
+HTTPS 反向代理需要同时转发 HTTP 请求与 `/api/remote.mux` WebSocket，并保留登录响应的 `Set-Cookie`。当前客户端使用服务根路径，暂不支持 `/harness/` 等子路径部署。
 
 如果收到 403，检查服务的 `trustedHosts` 是否包含你填写的 IP 和端口；如果收到 401，用服务当前的启动链接重新登录。该客户端不会更改服务器的监听地址、信任配置或认证策略。
 
@@ -49,7 +53,7 @@ DeepSeek harness 的原生安卓客户端。Kotlin + Jetpack Compose 实现界�
 
 ## GitHub 远程构建
 
-推送到 `main` 或在 [Actions](https://github.com/Banben07/dsh_Android/actions/workflows/android.yml) 页面选择 **Run workflow**。流水线执行协议测试、Android Lint 和 APK 编译，通过后将 APK 保存为 Artifact 并发布带构建编号的预览 Release。构建过程不需要访问你的 Tailscale 网络、后端登录 Token 或模型 API Key。
+推送到 `main` 或在 [Actions](https://github.com/Banben07/dsh_Android/actions/workflows/android.yml) 页面选择 **Run workflow**。流水线执行协议测试、Android Lint 和 APK 编译，通过后将 APK 保存为 Artifact 并发布带构建编号的预览 Release。构建过程不需要访问你的服务器网络、后端登录 Token 或模型 API Key。
 
 构建版本固定为 JDK 17、Gradle 8.11.1、Android Gradle Plugin 8.9.2、Kotlin 2.1.20、Android SDK 35。Gradle Wrapper 包含 SHA-256 校验。当前工程无需 Android Studio 即可通过 Actions 构建。
 

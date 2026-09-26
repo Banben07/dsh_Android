@@ -124,7 +124,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                         mutable.update { it.copy(connection = ConnectionStatus.OFFLINE, showConnection = true, pending = emptyList(), error = e.message) }
                         return@launch
                     }
-                    mutable.update { it.copy(connection = ConnectionStatus.RETRYING, error = "连接中断，正在重连。请确认手机 Tailscale 已连接。", pending = emptyList()) }
+                    mutable.update { it.copy(connection = ConnectionStatus.RETRYING, error = "连接中断，正在重连。请检查网络连接和服务地址。", pending = emptyList()) }
                     retry++
                 } finally {
                     active?.close()

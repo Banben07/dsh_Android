@@ -177,7 +177,7 @@ private fun EmptyHome(state: HarnessState, onNew: () -> Unit, modifier: Modifier
         Spacer(Modifier.height(30.dp))
         Button(onClick = onNew, enabled = state.connected, contentPadding = PaddingValues(horizontal = 25.dp, vertical = 15.dp), shape = RoundedCornerShape(16.dp)) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("开始新会话") }
         Spacer(Modifier.height(36.dp))
-        FeatureHint(Icons.Default.Lan, "连接自己的服务", "使用 Tailscale 地址与已有工作空间")
+        FeatureHint(Icons.Default.Lan, "连接自己的服务", "使用服务器地址与已有工作空间")
         FeatureHint(Icons.Default.Forum, "会话同步", "从上次的进度继续，实时查看回复")
         FeatureHint(Icons.Default.CheckCircleOutline, "由你确认", "在原生界面回答问题和批准操作")
     }
@@ -241,7 +241,7 @@ private fun Composer(state: HarnessState, vm: HarnessViewModel, onModel: () -> U
                     }
                 }
             }
-            Text(if (state.session?.running == true) { if (steer) "引导模式 · 消息会用于调整当前任务" else "排队模式 · 消息会加入待处理队列" } else "通过你的 Tailscale 网络连接", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 7.dp).align(Alignment.CenterHorizontally))
+            Text(if (state.session?.running == true) { if (steer) "引导模式 · 消息会用于调整当前任务" else "排队模式 · 消息会加入待处理队列" } else "模型与工具在你的服务器上运行", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 7.dp).align(Alignment.CenterHorizontally))
         }
     }
 }
