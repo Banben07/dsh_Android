@@ -48,9 +48,9 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
                     TopAppBar(
                         title = {
                             Column {
-                                Text(state.session?.title ?: "DeepSeek Harness", maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                Text(if (state.creatingSelected) "新对话" else state.session?.title ?: "DeepSeek Harness", maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
                                 Text(when (state.connection) {
-                                    ConnectionStatus.CONNECTED -> if (state.session?.running == true) "正在执行" else "已连接 · ${state.server.removePrefix("http://").removePrefix("https://") }"
+                                    ConnectionStatus.CONNECTED -> if (state.creatingSelected) "正在创建会话…" else if (state.syncing) "正在同步会话…" else if (state.session?.running == true) "正在执行" else "已连接 · ${state.server.removePrefix("http://").removePrefix("https://") }"
                                     ConnectionStatus.CONNECTING -> "正在连接服务…"
                                     ConnectionStatus.RETRYING -> "正在重新连接…"
                                     ConnectionStatus.OFFLINE -> "未连接"
@@ -59,7 +59,10 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
                         },
                         navigationIcon = { if (!wide) IconButton(onClick = { scope.launch { drawer.open() } }) { Icon(Icons.Default.Menu, "打开会话列表") } },
                         actions = {
-                            if (state.selectedId != null) IconButton(onClick = { renaming = true }, enabled = state.connected) { Icon(Icons.Default.Edit, "重命名会话", modifier = Modifier.size(20.dp)) }
+                            IconButton(onClick = openNew, enabled = state.connected && !state.creating) {
+                                Icon(Icons.Default.Add, "新建对话", modifier = Modifier.size(24.dp))
+                            }
+                            if (state.selectedId != null) IconButton(onClick = { renaming = true }, enabled = state.connected && !state.creatingSelected) { Icon(Icons.Default.Edit, "重命名会话", modifier = Modifier.size(20.dp)) }
                             IconButton(onClick = vm::settings) { Icon(Icons.Default.Tune, "连接设置") }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
@@ -92,7 +95,7 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
                             }
                         }
                     }
-                    if (state.selectedId != null) Composer(state, vm, onModel = { choosingModel = true })
+                    if (state.selectedId != null && !state.creatingSelected) Composer(state, vm, onModel = { choosingModel = true })
                     else if (!state.connected) TextButton(onClick = vm::settings, modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 24.dp)) { Text("设置服务器连接") }
                 }
             }

@@ -21,10 +21,10 @@ data class HarnessState(
     val selectedId: String? = null, val messages: List<DisplayMessage> = emptyList(),
     val pending: List<PendingQuestion> = emptyList(), val answering: Set<String> = emptySet(),
     val selectedModel: JsonObject = emptyObject, val loading: Boolean = false,
-    val hasMore: Boolean = false, val loadingOlder: Boolean = false,
+    val hasMore: Boolean = false, val loadingOlder: Boolean = false, val syncing: Boolean = false,
     val sending: Boolean = false, val creating: Boolean = false, val queued: Boolean = false,
     val attachmentDrafts: Map<String, List<DraftAttachment>> = emptyMap(),
-    val sendingSessionId: String? = null,
+    val sendingSessionId: String? = null, val creatingSessionId: String? = null,
     val defaults: SessionDefaults = SessionDefaults(), val notifications: Boolean = false,
     val diagnostics: String? = null, val diagnosing: Boolean = false,
     val commands: List<SlashCommand> = emptyList(), val commandsLoading: Boolean = false, val commandsError: String? = null,
@@ -37,6 +37,7 @@ data class HarnessState(
     val connected get() = connection == ConnectionStatus.CONNECTED
     val session get() = sessions.firstOrNull { it.id == selectedId }
     val attachments get() = attachmentDrafts[selectedId].orEmpty()
+    val creatingSelected get() = creatingSessionId != null && creatingSessionId == selectedId
 }
 
 class HarnessViewModel(application: Application) : AndroidViewModel(application) {
@@ -57,6 +58,13 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private var sendJob: Job? = null
     private var activeSendId: String? = null
     private var exportJob: Job? = null
+    private var createJob: Job? = null
+    private var commandsJob: Job? = null
+    private val sessionViews = SessionViewCache()
+    private var wasBackgrounded = false
+    private var resumeCheckJob: Job? = null
+    private var resumeCheckId: String? = null
+    private var resumeCheckResult: CompletableDeferred<Unit>? = null
 
     fun draft(): String = drafts[state.value.selectedId.orEmpty()].orEmpty()
     fun setDraft(text: String) { drafts[state.value.selectedId.orEmpty()] = text }
@@ -97,7 +105,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         val address = try { ServerAddress.parse(input, token) } catch (e: Exception) { fail(e); return }
         val changed = state.value.server != address.origin
         stop()
-        if (changed) { drafts.clear(); journal = SessionJournal(); restoreRecent = true }
+        if (changed) { sessionViews.clear(); drafts.clear(); journal = SessionJournal(); restoreRecent = true }
         store.server = address.origin
         mutable.update { if (changed) HarnessState(server = address.origin, showConnection = false, defaults = store.defaults(address.origin), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) else it.copy(showConnection = false, error = null, sending = false, sendingSessionId = null) }
         client = HarnessClient(address.copy(launchToken = null), store)
@@ -105,8 +113,14 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     fun resume() {
         pauseJob?.cancel()
+        val returning = wasBackgrounded
+        wasBackgrounded = false
         if (connectionJob?.isActive == true) {
             if (state.value.connected && store.keepBackgroundConnection && NotificationMonitor.appVisible) startBackgroundConnection()
+            if (returning && !state.value.showConnection) {
+                if (state.value.connection == ConnectionStatus.RETRYING) reconnect()
+                else if (state.value.connected) checkResumedConnection()
+            }
             return
         }
         if (state.value.showConnection || state.value.server.isBlank()) return
@@ -114,6 +128,8 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         start(null)
     }
     fun pause() {
+        wasBackgrounded = true
+        resumeCheckJob?.cancel()
         pauseJob?.cancel()
         if (store.keepBackgroundConnection) return
         pauseJob = viewModelScope.launch {
@@ -122,15 +138,43 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             mutable.update { it.copy(connection = ConnectionStatus.OFFLINE, pending = emptyList()) }
         }
     }
-    fun reconnect() { pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); start(null) }
+    fun reconnect() { resumeCheckJob?.cancel(); pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); start(null) }
+    private fun checkResumedConnection() {
+        val active = mux ?: return
+        resumeCheckJob?.cancel()
+        resumeCheckJob = viewModelScope.launch {
+            val id = "resume-${UUID.randomUUID()}"
+            val result = CompletableDeferred<Unit>()
+            resumeCheckId = id; resumeCheckResult = result
+            var failed = false
+            try {
+                // A read-only subscription baseline verifies this exact WebSocket and VPN route.
+                // HTTP success alone cannot tell us whether the old socket survived backgrounding.
+                active.open(id, "workspace/follow")
+                withTimeout(5_000) { result.await() }
+            } catch (e: Exception) {
+                if (e is CancellationException && e !is TimeoutCancellationException) throw e
+                failed = true
+            } finally {
+                active.cancel(id)
+                if (resumeCheckId == id) { resumeCheckId = null; resumeCheckResult = null }
+            }
+            if (failed && mux === active && state.value.connected) {
+                resumeCheckJob = null
+                reconnect()
+            }
+        }
+    }
     fun logout() {
         stop(); store.forgetCookies(); client = null
-        drafts.clear(); mutable.update { HarnessState(server = it.server, showConnection = true, defaults = store.defaults(it.server), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) }
+        sessionViews.clear(); journal = SessionJournal(); drafts.clear(); mutable.update { HarnessState(server = it.server, showConnection = true, defaults = store.defaults(it.server), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) }
     }
     private fun stop(stopMonitor: Boolean = true) {
+        val incompleteId = state.value.creatingSessionId
         sendJob?.cancel(); activeSendId = null
-        exportJob?.cancel()
-        mutable.update { it.copy(exporting = false, archivingSessionId = null) }
+        exportJob?.cancel(); createJob?.cancel(); commandsJob?.cancel(); resumeCheckJob?.cancel()
+        mutable.update { it.copy(exporting = false, archivingSessionId = null, creating = false, creatingSessionId = null,
+            selectedId = if (it.selectedId == incompleteId) null else it.selectedId) }
         if (stopMonitor) NotificationMonitor.stop(getApplication())
         epoch++; pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); mux = null
         client?.close(); clientId = null; followId = null
@@ -148,11 +192,16 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
             var retry = 0
+            var hasConnected = false
             while (isActive && generation == epoch) {
                 var active: HarnessMux? = null
                 var stage = "建立实时连接失败"
+                var connectedAt: Long? = null
                 try {
                     mutable.update { it.copy(connection = if (retry == 0) ConnectionStatus.CONNECTING else ConnectionStatus.RETRYING) }
+                    // VPN/idle disconnects can invalidate pooled HTTP sockets as well as the mux.
+                    // Keep non-idempotent requests non-retrying; discard only unused connections.
+                    api.discardIdleConnections()
                     active = api.mux(); mux = active
                     val first = withTimeout(20_000) { active.frames.receive() }
                     val ready = first["value"].obj()
@@ -166,13 +215,14 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     val recent = if (restoreRecent) store.recent(api.address.origin) else state.value.selectedId
                     restoreRecent = false
                     mutable.update { it.copy(connection = ConnectionStatus.CONNECTED, sessions = sessions,
-                        selectedId = recent?.takeIf { id -> sessions.any { row -> row.id == id } }, pending = emptyList(), error = null) }
+                        selectedId = recent?.takeIf { id -> sessions.any { row -> row.id == id } || id == state.value.creatingSessionId }, pending = emptyList(), error = null) }
                     if (store.keepBackgroundConnection && NotificationMonitor.appVisible) startBackgroundConnection()
                     active.open("control", "session/control")
                     active.open("workspaces", "workspace/follow")
-                    state.value.selectedId?.let { follow(it) }
+                    state.value.selectedId?.takeUnless { it == state.value.creatingSessionId }?.let { follow(it) }
                     loadCatalog(api, generation)
-                    retry = 0
+                    connectedAt = android.os.SystemClock.elapsedRealtime()
+                    hasConnected = true
                     stage = "同步会话失败"
                     for (frame in active.frames) process(frame)
                     throw HarnessException("stream/closed", "服务连接已断开")
@@ -183,14 +233,21 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                         mutable.update { it.copy(connection = ConnectionStatus.OFFLINE, showConnection = true, pending = emptyList(), error = connectionFailureMessage(e, stage)) }
                         return@launch
                     }
-                    mutable.update { it.copy(connection = ConnectionStatus.RETRYING, error = connectionFailureMessage(e, stage) + "\n正在自动重连。", pending = emptyList()) }
+                    // A suspended or replaced VPN socket is recoverable; show detailed errors
+                    // only if recovery keeps failing. Authentication/protocol errors above stay immediate.
+                    // Only a stable connection resets recovery attempts; repeated short-lived
+                    // handshakes must eventually report an error too.
+                    if (connectedAt?.let { android.os.SystemClock.elapsedRealtime() - it >= 30_000 } == true) retry = 0
+                    val briefRecovery = hasConnected && retry < 2 && e !is javax.net.ssl.SSLException
+                    mutable.update { it.copy(connection = ConnectionStatus.RETRYING,
+                        error = if (briefRecovery) null else connectionFailureMessage(e, stage) + "\n正在自动重连。", pending = emptyList()) }
                     retry++
                 } finally {
                     active?.close()
                     if (mux === active) { mux = null; clientId = null; followId = null }
                 }
                 val cap = minOf(10_000L, 500L shl minOf(retry, 5))
-                delay(Random.nextLong(cap / 2, cap + 1))
+                delay(if (hasConnected && retry == 1) 250L else Random.nextLong(cap / 2, cap + 1))
             }
         }
     }
@@ -218,17 +275,30 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             } catch (e: Exception) { if (e is CancellationException) throw e }
         }
     }
-    private fun process(frame: JsonObject) {
+    private suspend fun process(frame: JsonObject) {
         val stream = frame.text("streamId")
+        if (stream == resumeCheckId) {
+            when (frame.text("type")) {
+                "item" -> resumeCheckResult?.complete(Unit)
+                "error", "end" -> resumeCheckResult?.completeExceptionally(HarnessException("stream/resume", "连接检查未完成"))
+            }
+            return
+        }
         if (frame.text("type") == "error") {
             val e = frame["error"].obj()
             if (stream == "events") throw HarnessException(e.text("code"), e.text("message"))
-            if (stream == followId) mutable.update { it.copy(loading = false, error = e.text("message")) }
+            if (stream == followId) {
+                followId = null
+                mutable.update { it.copy(loading = false, syncing = false, error = e.text("message")) }
+            }
             return
         }
         if (frame.text("type") == "end") {
             if (stream == "events") throw HarnessException("stream/ended", "实时事件流结束")
-            if (stream == followId) mutable.update { it.copy(loading = false, error = "会话事件流已结束，请重新打开会话") }
+            if (stream == followId) {
+                followId = null
+                mutable.update { it.copy(loading = false, syncing = false, error = "会话事件流已结束，请重新打开会话") }
+            }
             return
         }
         if (frame.text("type") != "item") return
@@ -238,9 +308,19 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             "control" -> processControl(v)
             "workspaces" -> processWorkspace(v)
             followId -> {
-                journal.accept(v)
+                val messages = if (v.text("type") == "snapshot") {
+                    // Large histories (including tool output) must not stall taps or drawer animation.
+                    val next = SessionJournal()
+                    val result = withContext(Dispatchers.Default) { next.accept(v); next.messages() }
+                    if (stream != followId) return // A newer selection owns the screen now.
+                    journal = next
+                    result
+                } else {
+                    journal.accept(v)
+                    journal.messages()
+                }
                 val model = journal.projections["modelSelection"].obj()["next"].obj()
-                mutable.update { it.copy(messages = journal.messages(), loading = false, hasMore = journal.hasMore,
+                mutable.update { it.copy(messages = messages, loading = false, syncing = false, hasMore = journal.hasMore,
                     selectedModel = if (v.text("type") == "snapshot") model.ifEmpty { defaultModel } else it.selectedModel,
                     queued = if (v.text("type") == "event" && v["event"].obj().text("type") == "user/message") false else it.queued) }
             }
@@ -264,7 +344,11 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                         val row = SessionSummary.parse(args.firstOrNull().obj())
                         mutable.update { it.copy(sessions = (it.sessions.filterNot { s -> s.id == row.id } + row).sortedByDescending { s -> s.updatedAt }) }
                     }
-                    "api-session/removed" -> mutable.update { it.copy(sessions = it.sessions.filterNot { s -> s.id == args.firstOrNull().string() }) }
+                    "api-session/removed" -> {
+                        val id = args.firstOrNull().string()
+                        sessionViews.remove(id)
+                        mutable.update { it.copy(sessions = it.sessions.filterNot { s -> s.id == id }) }
+                    }
                     "api-session/status" -> {
                         val id = args.firstOrNull().string(); val running = (args.getOrNull(1) as? JsonPrimitive)?.booleanOrNull ?: false
                         mutable.update { it.copy(sessions = it.sessions.map { s -> if (s.id == id) s.copy(running = running) else s }) }
@@ -313,36 +397,54 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }
-    fun selectSession(id: String) {
-        if (id == state.value.selectedId && journal.initialized) return
-        mutable.update { it.copy(selectedId = id, messages = emptyList(), selectedModel = emptyObject, loading = true, hasMore = false, error = null, queued = false) }
-        store.remember(state.value.server, id)
+    private fun showSession(id: String?) {
+        val previous = state.value
+        previous.selectedId?.takeIf { journal.initialized }?.let {
+            sessionViews.put(it, SessionViewCache.View(previous.messages, previous.selectedModel, previous.hasMore))
+        }
+        commandsJob?.cancel()
+        followId?.let { mux?.cancel(it) }
+        followId = null
         journal = SessionJournal()
-        if (state.value.connected) {
-            try { follow(id) }
-            catch (e: Exception) {
-                // The socket can close between a tap and send(). Keep this UI callback from
-                // throwing on the main thread; reconnect will follow the selected session again.
-                if (e is CancellationException) throw e
-                mutable.update { it.copy(loading = false) }
-                reconnect()
-            }
+        val cached = id?.let { sessionViews[it] }
+        mutable.update { it.copy(selectedId = id, messages = cached?.messages.orEmpty(),
+            selectedModel = cached?.model ?: defaultModel, loading = id != null && cached == null,
+            syncing = id != null, hasMore = cached?.hasMore ?: false, loadingOlder = false,
+            error = null, queued = false, commands = emptyList(), commandsLoading = false, commandsError = null) }
+    }
+    fun selectSession(id: String) {
+        if (id == state.value.selectedId && (followId != null || state.value.creatingSelected)) return
+        showSession(id)
+        if (state.value.creatingSelected) return
+        store.remember(state.value.server, id)
+        followSelected()
+    }
+    private fun followSelected() {
+        val id = state.value.selectedId ?: return
+        if (!state.value.connected || state.value.creatingSelected) return
+        try { follow(id) }
+        catch (e: Exception) {
+            if (e is CancellationException) throw e
+            reconnect()
         }
     }
     private fun follow(id: String) {
+        commandsJob?.cancel()
         followId?.let { mux?.cancel(it) }
         journal = SessionJournal()
         val streamId = "session-${UUID.randomUUID()}"; followId = streamId
-        mutable.update { it.copy(loading = true) }
+        mutable.update { it.copy(syncing = true) }
         mux?.open(streamId, "session/follow", jsonObject("request" to jsonObject(
             "address" to address(id), "maxMessages" to JsonPrimitive(60), "assistantStream" to JsonPrimitive(true))))
         loadCommands()
     }
     fun loadCommands() {
+        commandsJob?.cancel()
         val id = state.value.selectedId ?: return
         val api = client ?: return
-        mutable.update { it.copy(commands = emptyList(), commandsLoading = true, commandsError = null) }
-        viewModelScope.launch {
+        if (state.value.creatingSelected) return
+        mutable.update { it.copy(commandsLoading = true, commandsError = null) }
+        commandsJob = viewModelScope.launch {
             try {
                 val commands = api.rpc("commands/list", jsonObject("agentId" to str(id))).array().map { SlashCommand.parse(it.obj()) }
                 if (api === client && state.value.selectedId == id) mutable.update { it.copy(commands = commands, commandsLoading = false) }
@@ -376,7 +478,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     fun loadOlder() {
         val id = state.value.selectedId ?: return
-        if (!state.value.connected || state.value.loadingOlder || !journal.hasMore) return
+        if (!state.value.connected || state.value.syncing || state.value.loadingOlder || !journal.hasMore) return
         val current = journal; val through = current.cursor; val before = current.firstSeq ?: return
         val api = client ?: return
         mutable.update { it.copy(loadingOlder = true) }
@@ -384,19 +486,49 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             try {
                 val page = api.command("session/page", jsonObject("address" to address(id), "throughSeq" to JsonPrimitive(through), "beforeSeq" to JsonPrimitive(before), "maxMessages" to JsonPrimitive(60))).obj()
                 if (state.value.selectedId == id && journal === current) { current.prepend(page); mutable.update { it.copy(messages = current.messages(), hasMore = current.hasMore) } }
-            } catch (e: Exception) { fail(e) } finally { mutable.update { it.copy(loadingOlder = false) } }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (journal === current) fail(e)
+            } finally { if (journal === current) mutable.update { it.copy(loadingOlder = false) } }
         }
     }
     fun createSession(workspaceId: String?, cwd: String, preset: String?, onCreated: () -> Unit) {
+        val api = client ?: return
         if (!state.value.connected || state.value.creating) return
-        mutable.update { it.copy(creating = true) }
-        operate { api ->
+        val previousId = state.value.selectedId
+        val requestedId = UUID.randomUUID().toString()
+        val directory = state.value.workspaces.firstOrNull { it.id == workspaceId }?.path ?: cwd.trim()
+        mutable.update { it.copy(creating = true, creatingSessionId = requestedId) }
+        showSession(requestedId)
+        createJob = viewModelScope.launch {
             try {
-                val v = api.command("session/create", jsonObject("sessionId" to str(UUID.randomUUID().toString()),
+                val v = api.command("session/create", jsonObject("sessionId" to str(requestedId),
                     "workspaceId" to workspaceId?.let(::str), "cwd" to cwd.trim().takeIf { it.isNotBlank() && workspaceId == null }?.let(::str), "agentPreset" to preset?.let(::str))).obj()
-                if (api !== client) return@operate
-                refresh(api); selectSession(v.text("sessionId")); onCreated()
-            } finally { mutable.update { it.copy(creating = false) } }
+                if (api !== client) return@launch
+                val id = v.text("sessionId").ifBlank { throw HarnessException("protocol/create", "服务器未返回新会话编号") }
+                val row = SessionSummary(id, "新对话", directory, System.currentTimeMillis(), false)
+                // The added event supplies full metadata. Never wait for another session/list RPC.
+                mutable.update { it.copy(sessions = if (it.sessions.any { s -> s.id == id }) it.sessions else listOf(row) + it.sessions,
+                    creating = false, creatingSessionId = null) }
+                if (state.value.selectedId == requestedId) {
+                    mutable.update { it.copy(selectedId = id, loading = false) }
+                    store.remember(api.address.origin, id)
+                    followSelected()
+                    onCreated()
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (api !== client) return@launch
+                if (state.value.selectedId == requestedId) {
+                    showSession(previousId?.takeIf { id -> state.value.sessions.any { it.id == id } })
+                    followSelected()
+                }
+                fail(e)
+            } finally {
+                if (api === client && state.value.creatingSessionId == requestedId) {
+                    mutable.update { it.copy(creating = false, creatingSessionId = null) }
+                }
+            }
         }
     }
     fun quickCreateSession() {
@@ -463,7 +595,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         val id = state.value.selectedId ?: return
         val attachments = state.value.attachments.toList()
         val api = client ?: return
-        if (!state.value.connected || state.value.sending || (text.isBlank() && attachments.isEmpty())) return
+        if (!state.value.connected || state.value.creatingSelected || state.value.sending || (text.isBlank() && attachments.isEmpty())) return
         val commandName = text.trimStart().takeIf { it.startsWith("/") }?.substringAfter('/')?.takeWhile { !it.isWhitespace() }
         val command = commandName?.let { name -> state.value.commands.firstOrNull { it.name == name } }
         if (commandName != null && command == null) {

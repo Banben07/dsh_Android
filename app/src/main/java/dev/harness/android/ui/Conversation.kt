@@ -62,7 +62,8 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
     key(state.server, state.selectedId) {
         val content = remember(state.messages) { conversationContent(state.messages) }
         val messages = content.messages
-        val list = rememberLazyListState()
+        // Start at the latest visible row, avoiding layout of old Markdown before jumping.
+        val list = rememberLazyListState(initialFirstVisibleItemIndex = messages.size)
         val scope = rememberCoroutineScope()
         var following by remember { mutableStateOf(true) }
         LaunchedEffect(list) {
@@ -78,7 +79,7 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
             LazyColumn(state = list, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
                 item(key = "history") {
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        if (state.hasMore) TextButton(onClick = { following = false; vm.loadOlder() }, enabled = state.connected && !state.loadingOlder) {
+                        if (state.hasMore) TextButton(onClick = { following = false; vm.loadOlder() }, enabled = state.connected && !state.syncing && !state.loadingOlder) {
                             if (state.loadingOlder) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.History, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(8.dp)); Text("加载更早的消息")
                         }
@@ -97,7 +98,12 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
                         Text(state.session?.cwd.orEmpty(), Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                if (state.loading) item { Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp) } }
+                if (state.loading) item {
+                    Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        if (state.creatingSelected) Text("正在创建会话…", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
             if (!following && messages.isNotEmpty()) SmallFloatingActionButton(onClick = { following = true; scope.launch { list.animateScrollToItem(messages.size) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = MaterialTheme.colorScheme.surface) { Icon(Icons.Default.ArrowDownward, "跳到最新消息") }
         }

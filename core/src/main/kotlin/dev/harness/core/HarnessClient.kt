@@ -9,6 +9,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.*
@@ -129,6 +131,8 @@ class HarnessClient internal constructor(val address: ServerAddress, private val
     suspend fun listSessions(): JsonObject = rpc("session/list", jsonObject("_request" to emptyObject)).obj()
     fun mux(): HarnessMux = HarnessMux(http, request(address.base.newBuilder().addPathSegments("api/remote.mux").build()).build())
     private fun request(url: HttpUrl) = Request.Builder().url(url).header("Origin", address.origin).header("User-Agent", "HarnessAndroid/0.2")
+    /** Drop stale keep-alive sockets after route changes without cancelling prompts in flight. */
+    suspend fun discardIdleConnections() = withContext(Dispatchers.IO) { http.connectionPool.evictAll() }
     override fun close() {
         if (closed.compareAndSet(false, true)) networkCleanup.execute {
             try { http.dispatcher.cancelAll() } finally { http.connectionPool.evictAll() }

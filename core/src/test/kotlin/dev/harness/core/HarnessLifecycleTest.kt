@@ -47,6 +47,32 @@ class HarnessLifecycleTest {
         }
     }
 
+    @Test fun `recovery drops idle sockets off the caller thread without cancelling active streams`() = runBlocking<Unit> {
+        MockWebServer().use { server ->
+            server.start()
+            val sockets = ClosingSockets()
+            val transport = OkHttpClient.Builder().socketFactory(sockets).build()
+            HarnessClient(ServerAddress.parse(server.url("/").toString()), transport).use { api ->
+                server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        webSocket.send("""{"type":"item","streamId":"events","value":{"type":"ready"}}""")
+                    }
+                }))
+                api.mux().use { mux ->
+                    withTimeout(3000) { mux.frames.receive() }
+                    server.enqueue(MockResponse().setBody("connected"))
+                    assertEquals(200, api.probe())
+                    val caller = Thread.currentThread()
+                    api.discardIdleConnections()
+                    sockets.assertClosedOff(caller)
+                    assertEquals(0, transport.connectionPool.idleConnectionCount())
+                    mux.open("still-active", "workspace/follow")
+                    withTimeout(3000) { mux.frames.receive() }
+                }
+            }
+        }
+    }
+
     @Test fun `closing a mux releases its socket off the caller thread`() = runBlocking {
         MockWebServer().use { server ->
             server.start()
