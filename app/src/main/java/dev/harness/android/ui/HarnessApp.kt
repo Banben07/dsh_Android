@@ -52,7 +52,7 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
                             Column {
                                 Text(if (state.creatingSelected) "新对话" else state.session?.title ?: "DeepSeek Harness", maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
                                 Text(when (state.connection) {
-                                    ConnectionStatus.CONNECTED -> if (state.creatingSelected) "正在创建会话…" else if (state.syncing) "正在同步会话…" else if (state.session?.running == true) "正在执行" else "已连接 · ${state.server.removePrefix("http://").removePrefix("https://") }"
+                                    ConnectionStatus.CONNECTED -> if (state.creatingSelected) "正在创建会话…" else if (state.syncing) "正在同步会话…" else if (state.session?.running == true) "正在执行" else "已连接"
                                     ConnectionStatus.CONNECTING -> "正在连接服务…"
                                     ConnectionStatus.RETRYING -> "正在重新连接…"
                                     ConnectionStatus.OFFLINE -> "未连接"
