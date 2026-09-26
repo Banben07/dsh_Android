@@ -7,6 +7,7 @@ import android.os.Build
 class HarnessApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        ConnectionLog.record(this, "进程启动")
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             runCatching {

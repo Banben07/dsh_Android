@@ -39,7 +39,7 @@ class BackgroundConnectionTest {
         backend.failResumeCheck = true
         model.pause()
         model.resume()
-        backend.until { backend.upgrades.get() >= 2 && model.state.value.connected && !model.state.value.syncing }
+        backend.until(advanceClock = true) { backend.upgrades.get() >= 2 && model.state.value.connected && !model.state.value.syncing }
         assertEquals("retained conversation", model.state.value.messages.single().text)
         assertNull(model.state.value.error)
     }
@@ -89,9 +89,9 @@ class BackgroundConnectionTest {
                                 val stream = frame.text("streamId")
                                 when (frame.text("endpoint")) {
                                     "\$events" -> webSocket.send("""{"type":"item","streamId":"events","value":{"type":"ready","clientId":"test-client"}}""")
-                                    "workspace/follow" -> if (failResumeCheck && stream.startsWith("resume-")) {
-                                        webSocket.send("""{"type":"error","streamId":"$stream","error":{"code":"stream/unavailable","message":"模拟后台连接失效"}}""")
-                                    } else webSocket.send("""{"type":"item","streamId":"$stream","value":{"type":"baseline","value":{"items":[],"archivedSessionIds":[]}}}""")
+                                    // A half-open socket never answers the probe; any reply would prove it alive.
+                                    "workspace/follow" -> if (failResumeCheck && stream.startsWith("probe-")) Unit
+                                    else webSocket.send("""{"type":"item","streamId":"$stream","value":{"type":"baseline","value":{"items":[],"archivedSessionIds":[]}}}""")
                                     "session/follow" -> webSocket.send("""{"type":"item","streamId":"$stream","value":{"type":"snapshot","cursor":0,"hasMore":false,"records":[{"event":{"seq":0,"type":"user/message","data":{"source":{"kind":"user"},"content":[{"type":"text","text":"retained conversation"}]}}}],"projections":{"values":{}},"assistantStream":{"revision":0}}}""")
                                 }
                             }

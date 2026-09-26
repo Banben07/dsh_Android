@@ -4,13 +4,16 @@ import java.io.Closeable
 import java.io.IOException
 import java.io.OutputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.*
@@ -145,13 +148,19 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
     @Volatile private var closed = false
     @Volatile var failed = false
         private set
+    /** Transport-level reason for the last failure or close, for diagnostics only. */
+    @Volatile var closeReason: String? = null
+        private set
+    private val probes = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val socket = http.newWebSocket(request, object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             webSocket.send(openFrame("events", "\$events", emptyObject).toString())
         }
         override fun onMessage(webSocket: WebSocket, text: String) {
             try {
-                if (!frames.trySend(parseObject(text)).isSuccess && !closed) {
+                val frame = parseObject(text)
+                probes.remove(frame.text("streamId"))?.complete(Unit)
+                if (!frames.trySend(frame).isSuccess && !closed) {
                     frames.close(HarnessException("stream/overflow", "实时消息过多，正在重新同步"))
                     webSocket.cancel()
                 }
@@ -161,11 +170,13 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
             }
         }
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            closeReason = "failure ${response?.code?.let { "HTTP $it " }.orEmpty()}${t.javaClass.simpleName}: ${t.message}"
             failed = true
             frames.close(response?.failure() ?: t)
         }
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, null) }
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            closeReason = "closed $code $reason"
             failed = true
             frames.close(if (closed) null else HarnessException("stream/closed", "连接已断开"))
         }
@@ -174,6 +185,24 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
         check(socket.send(openFrame(id, endpoint, args).toString())) { "连接已断开" }
     }
     fun cancel(id: String) { socket.send(jsonObject("type" to str("cancel"), "streamId" to str(id)).toString()) }
+    /**
+     * Round-trip a read-only stream and wait for its first frame on the socket thread, so a busy
+     * frame consumer cannot make a healthy socket look dead. Any reply, including an error, proves liveness.
+     */
+    suspend fun probe(endpoint: String, timeoutMillis: Long): Boolean {
+        val id = "probe-${UUID.randomUUID()}"
+        val answered = CompletableDeferred<Unit>()
+        probes[id] = answered
+        return try {
+            open(id, endpoint)
+            withTimeoutOrNull(timeoutMillis) { answered.await() } != null
+        } catch (_: IllegalStateException) {
+            false
+        } finally {
+            probes.remove(id)
+            cancel(id)
+        }
+    }
     override fun close() {
         if (closed) return
         closed = true

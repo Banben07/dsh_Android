@@ -63,8 +63,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private val sessionViews = SessionViewCache()
     private var wasBackgrounded = false
     private var resumeCheckJob: Job? = null
-    private var resumeCheckId: String? = null
-    private var resumeCheckResult: CompletableDeferred<Unit>? = null
+    private var pausedAt = 0L
 
     fun draft(): String = drafts[state.value.selectedId.orEmpty()].orEmpty()
     fun setDraft(text: String) { drafts[state.value.selectedId.orEmpty()] = text }
@@ -111,10 +110,12 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         client = HarnessClient(address.copy(launchToken = null), store)
         start(address.launchToken)
     }
+    private fun log(event: String) = ConnectionLog.record(getApplication(), event)
     fun resume() {
         pauseJob?.cancel()
         val returning = wasBackgrounded
         wasBackgrounded = false
+        if (returning) log("回到前台：后台 ${(android.os.SystemClock.elapsedRealtime() - pausedAt) / 1000}s，状态 ${state.value.connection}，socket ${if (mux == null) "无" else if (mux?.failed == true) "已失效" else "存活"}")
         if (connectionJob?.isActive == true) {
             if (state.value.connected && store.keepBackgroundConnection && NotificationMonitor.appVisible) startBackgroundConnection()
             if (returning && !state.value.showConnection) {
@@ -129,6 +130,8 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     fun pause() {
         wasBackgrounded = true
+        pausedAt = android.os.SystemClock.elapsedRealtime()
+        log("进入后台：状态 ${state.value.connection}，后台保持连接 ${store.keepBackgroundConnection}")
         resumeCheckJob?.cancel()
         pauseJob?.cancel()
         if (store.keepBackgroundConnection) return
@@ -157,28 +160,14 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         val active = mux ?: return
         resumeCheckJob?.cancel()
         resumeCheckJob = viewModelScope.launch {
-            val id = "resume-${UUID.randomUUID()}"
-            val result = CompletableDeferred<Unit>()
-            resumeCheckId = id
-            resumeCheckResult = result
-            var failed = false
-            try {
-                // A lightweight read-only stream tests the existing WebSocket after the
-                // app returns from background. This catches half-open VPN/mobile routes
-                // that have not delivered an OkHttp failure callback yet.
-                active.open(id, "workspace/follow")
-                withTimeout(3_000) { result.await() }
-            } catch (e: Exception) {
-                if (e is CancellationException && e !is TimeoutCancellationException) throw e
-                failed = true
-            } finally {
-                active.cancel(id)
-                if (resumeCheckId == id) {
-                    resumeCheckId = null
-                    resumeCheckResult = null
-                }
-            }
-            if (failed && mux === active && state.value.connected) reconnect()
+            // A lightweight read-only stream tests the existing WebSocket after the
+            // app returns from background. This catches half-open VPN/mobile routes
+            // that have not delivered an OkHttp failure callback yet. The reply is
+            // observed on the socket thread, so a busy UI cannot fail a healthy socket.
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            val alive = active.probe("workspace/follow", 5_000)
+            log("连接检查${if (alive) "通过" else "无响应"}：${android.os.SystemClock.elapsedRealtime() - startedAt}ms")
+            if (!alive && mux === active && state.value.connected) reconnect()
         }
     }
     private fun start(token: String?) {
@@ -211,6 +200,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                         throw HarnessException("protocol/ready", "harness 实时握手失败，请确认后端接口版本")
                     }
                     clientId = ready.text("clientId")
+                    log("实时连接已建立：第 ${retry + 1} 次尝试")
                     // Read baseline while event frames remain queued, then apply those frames in order.
                     stage = "读取会话列表失败"
                     val sessions = api.listSessions()["items"].array().map { SessionSummary.parse(it.obj()) }
@@ -231,6 +221,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                 } catch (e: Exception) {
                     if (e is CancellationException && e !is TimeoutCancellationException) throw e
                     if (generation != epoch) return@launch
+                    log("实时连接中断（$stage）：${active?.closeReason ?: "${e.javaClass.simpleName}: ${e.message}"}，已连接 ${connectedAt?.let { (android.os.SystemClock.elapsedRealtime() - it) / 1000 }?.let { "${it}s" } ?: "未完成握手"}，重试 $retry")
                     if (e is HarnessException && (e.code.startsWith("auth/") || e.code.startsWith("protocol/"))) {
                         mutable.update { it.copy(connection = ConnectionStatus.OFFLINE, showConnection = true, pending = emptyList(), error = connectionFailureMessage(e, stage)) }
                         return@launch
@@ -279,13 +270,6 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     private suspend fun process(frame: JsonObject) {
         val stream = frame.text("streamId")
-        if (stream == resumeCheckId) {
-            when (frame.text("type")) {
-                "item" -> resumeCheckResult?.complete(Unit)
-                "error", "end" -> resumeCheckResult?.completeExceptionally(HarnessException("stream/resume", "连接检查未完成"))
-            }
-            return
-        }
         if (frame.text("type") == "error") {
             val e = frame["error"].obj()
             if (stream == "events") throw HarnessException(e.text("code"), e.text("message"))
@@ -556,7 +540,8 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     private fun startBackgroundConnection() {
         try { NotificationMonitor.start(getApplication()) }
-        catch (_: RuntimeException) {
+        catch (e: RuntimeException) {
+            log("后台服务启动失败：${e.javaClass.simpleName}: ${e.message}")
             store.notifications = false
             store.keepBackgroundConnection = false
             mutable.update { it.copy(notifications = false, keepBackgroundConnection = false, error = "系统暂时无法启动后台消息服务，请回到应用设置重新开启后台保持连接。") }
@@ -714,5 +699,5 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     private fun fail(e: Exception) { if (e is CancellationException) throw e; mutable.update { it.copy(error = e.message ?: "操作失败，请重试") } }
     private fun address(id: String) = jsonObject("kind" to str("session"), "sessionId" to str(id))
-    override fun onCleared() { stop(stopMonitor = false); super.onCleared() }
+    override fun onCleared() { log("界面已销毁，释放实时连接"); stop(stopMonitor = false); super.onCleared() }
 }

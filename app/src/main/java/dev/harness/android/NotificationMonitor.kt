@@ -26,6 +26,7 @@ class NotificationMonitor : Service() {
         val notification = connectionNotification("正在连接消息服务")
         if (Build.VERSION.SDK_INT >= 34) startForeground(ONGOING_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
         else startForeground(ONGOING_ID, notification)
+        ConnectionLog.record(this, "后台服务已启动")
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val store = SessionStore(this)
@@ -116,12 +117,13 @@ class NotificationMonitor : Service() {
                 }
             } catch (e: Exception) {
                 if (e is CancellationException && e !is TimeoutCancellationException) throw e
+                ConnectionLog.record(this, "后台通知连接中断：${e.javaClass.simpleName}: ${e.message}")
                 manager.notify(ONGOING_ID, connectionNotification("消息连接中断，正在重连"))
             }
             delay(5_000)
         }
     }
-    override fun onDestroy() { scope.cancel(); super.onDestroy() }
+    override fun onDestroy() { ConnectionLog.record(this, "后台服务已停止"); scope.cancel(); super.onDestroy() }
     companion object {
         private const val CONNECTION_CHANNEL = "background-connection"
         private const val REPLY_CHANNEL = "completed-replies"

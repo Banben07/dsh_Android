@@ -101,6 +101,11 @@ fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dis
                     context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("DeepSeek Harness 崩溃记录", crash))
                     android.widget.Toast.makeText(context, "崩溃记录已复制", android.widget.Toast.LENGTH_SHORT).show()
                 }) { Text("复制上次崩溃记录") }
+                TextButton(onClick = {
+                    val log = dev.harness.android.ConnectionLog.report(context) ?: "暂无连接记录"
+                    context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("DeepSeek Harness 连接日志", log))
+                    android.widget.Toast.makeText(context, "连接日志已复制", android.widget.Toast.LENGTH_SHORT).show()
+                }) { Text("复制连接日志") }
                 if (state.server.isNotBlank()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     TextButton(onClick = logout) { Text("清除登录状态") }
                     TextButton(onClick = dismiss) { Text("返回") }
