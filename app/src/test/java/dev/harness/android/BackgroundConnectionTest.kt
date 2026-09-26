@@ -34,6 +34,16 @@ class BackgroundConnectionTest {
         assertEquals(ConnectionStatus.OFFLINE, model.state.value.connection)
     }
 
+    @Test fun returningFromBackgroundRebuildsAHalfOpenSocket() = Backend().use { backend ->
+        val model = backend.model
+        backend.ignoreResumeCheck = true
+        model.pause()
+        model.resume()
+        backend.until(advanceClock = true) { backend.upgrades.get() >= 2 && model.state.value.connected && !model.state.value.syncing }
+        assertEquals("retained conversation", model.state.value.messages.single().text)
+        assertNull(model.state.value.error)
+    }
+
     @Test fun reconnectingAfterServerSocketFailureKeepsMessages() = Backend().use { backend ->
         val model = backend.model
         backend.rejectReconnect = true
@@ -60,6 +70,7 @@ class BackgroundConnectionTest {
         val upgrades = AtomicInteger()
         val requestPaths = ConcurrentLinkedQueue<String>()
         @Volatile var rejectReconnect = false
+        @Volatile var ignoreResumeCheck = false
         val looper = shadowOf(Looper.getMainLooper())
         val model: HarnessViewModel
         init {
@@ -78,7 +89,9 @@ class BackgroundConnectionTest {
                                 val stream = frame.text("streamId")
                                 when (frame.text("endpoint")) {
                                     "\$events" -> webSocket.send("""{"type":"item","streamId":"events","value":{"type":"ready","clientId":"test-client"}}""")
-                                    "workspace/follow" -> Unit
+                                    "workspace/follow" -> if (!ignoreResumeCheck || !stream.startsWith("resume-")) {
+                                        webSocket.send("""{"type":"item","streamId":"$stream","value":{"type":"baseline","value":{"items":[],"archivedSessionIds":[]}}}""")
+                                    }
                                     "session/follow" -> webSocket.send("""{"type":"item","streamId":"$stream","value":{"type":"snapshot","cursor":0,"hasMore":false,"records":[{"event":{"seq":0,"type":"user/message","data":{"source":{"kind":"user"},"content":[{"type":"text","text":"retained conversation"}]}}}],"projections":{"values":{}},"assistantStream":{"revision":0}}}""")
                                 }
                             }
