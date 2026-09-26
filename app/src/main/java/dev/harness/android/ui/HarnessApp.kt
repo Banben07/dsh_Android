@@ -135,7 +135,8 @@ private fun Sidebar(state: HarnessState, select: (String) -> Unit, onNew: () -> 
     var showArchived by rememberSaveable { mutableStateOf(false) }
     val workspaceSessions = state.workspaces.firstOrNull { it.id == workspace }?.sessions?.toSet()
     val sessions = state.sessions.filter {
-        !it.isChild && (it.id in state.archived) == showArchived &&
+        // Sessions never used for a conversation disappear once another session is open.
+        !it.isChild && (!it.blank || it.id == state.selectedId) && (it.id in state.archived) == showArchived &&
             (workspaceSessions == null || it.id in workspaceSessions) &&
             (search.isBlank() || it.title.contains(search, true) || it.cwd.contains(search, true))
     }

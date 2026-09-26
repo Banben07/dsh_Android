@@ -115,6 +115,30 @@ class SessionNavigationTest {
         assertTrue(model.state.value.loading)
     }
 
+    @Test fun newSessionStaysBlankUntilItHasMessages() = Backend().use { backend ->
+        val model = backend.model
+        backend.releaseCreate.countDown()
+        model.quickCreateSession()
+        backend.until { !model.state.value.creating }
+        val id = model.state.value.selectedId!!
+        assertTrue("An unused session is hidden from the list after leaving it", model.state.value.sessions.single { it.id == id }.blank)
+        backend.snapshot(backend.follow(id), "first message")
+        backend.until { !model.state.value.sessions.single { it.id == id }.blank }
+    }
+
+    @Test fun prefetchedRecentSessionOpensFromCacheWithoutWaiting() = Backend().use { backend ->
+        val model = backend.model
+        backend.until { backend.prefetches.any { it.sessionId == "b" } }
+        backend.snapshot(backend.prefetches.first { it.sessionId == "b" }, "prefetched B")
+        model.selectSession("b")
+        val live = backend.follow("b") // Withheld: the warmed history must not wait for it.
+        backend.until { !model.state.value.loading && model.state.value.messages.singleOrNull()?.text == "prefetched B" }
+        assertTrue(model.state.value.syncing)
+        backend.snapshot(live, "live B")
+        backend.until { !model.state.value.syncing }
+        assertEquals("live B", model.state.value.messages.single().text)
+    }
+
     private data class Follow(val streamId: String, val sessionId: String, val socket: WebSocket)
 
     private class Backend(val failCreate: Boolean = false) : AutoCloseable {
@@ -124,6 +148,7 @@ class SessionNavigationTest {
         val lists = AtomicInteger()
         val prompts = AtomicInteger()
         val follows = ConcurrentLinkedQueue<Follow>()
+        val prefetches = ConcurrentLinkedQueue<Follow>()
         val model: HarnessViewModel
         private val looper = shadowOf(Looper.getMainLooper())
 
@@ -138,7 +163,8 @@ class SessionNavigationTest {
                             val frame = parseObject(text)
                             when (frame.text("endpoint")) {
                                 "\$events" -> webSocket.send("""{"type":"item","streamId":"events","value":{"type":"ready","clientId":"test-client"}}""")
-                                "session/follow" -> follows.add(Follow(frame.text("streamId"), frame["payload"].obj()["args"].obj()["request"].obj()["address"].obj().text("sessionId"), webSocket))
+                                "session/follow" -> Follow(frame.text("streamId"), frame["payload"].obj()["args"].obj()["request"].obj()["address"].obj().text("sessionId"), webSocket)
+                                    .let { if (it.streamId.startsWith("prefetch-")) prefetches.add(it) else follows.add(it) }
                             }
                         }
                     })

@@ -64,6 +64,9 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private var wasBackgrounded = false
     private var resumeCheckJob: Job? = null
     private var pausedAt = 0L
+    private var followStartedAt = 0L
+    /** Background snapshot streams (stream id to session id) that warm the view cache for quick switching. */
+    private val prefetching = mutableMapOf<String, String>()
 
     fun draft(): String = drafts[state.value.selectedId.orEmpty()].orEmpty()
     fun setDraft(text: String) { drafts[state.value.selectedId.orEmpty()] = text }
@@ -212,6 +215,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     active.open("control", "session/control")
                     active.open("workspaces", "workspace/follow")
                     state.value.selectedId?.takeUnless { it == state.value.creatingSessionId }?.let { follow(it) }
+                    prefetchRecent(active)
                     loadCatalog(api, generation)
                     connectedAt = android.os.SystemClock.elapsedRealtime()
                     hasConnected = true
@@ -237,7 +241,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     retry++
                 } finally {
                     active?.close()
-                    if (mux === active) { mux = null; clientId = null; followId = null }
+                    if (mux === active) { mux = null; clientId = null; followId = null; prefetching.clear() }
                 }
                 val cap = minOf(10_000L, 500L shl minOf(retry, 5))
                 delay(if (hasConnected && retry == 1) 250L else Random.nextLong(cap / 2, cap + 1))
@@ -268,8 +272,33 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             } catch (e: Exception) { if (e is CancellationException) throw e }
         }
     }
+    private fun prefetchRecent(active: HarnessMux) {
+        state.value.sessions.asSequence()
+            .filter { !it.isChild && !it.blank && it.id != state.value.selectedId && it.id !in state.value.archived && sessionViews[it.id] == null }
+            .sortedByDescending { it.updatedAt }.take(PREFETCH_SESSIONS)
+            .forEach { session ->
+                val streamId = "prefetch-${UUID.randomUUID()}"
+                prefetching[streamId] = session.id
+                active.open(streamId, "session/follow", jsonObject("request" to jsonObject(
+                    "address" to address(session.id), "maxMessages" to JsonPrimitive(INITIAL_MESSAGES), "assistantStream" to JsonPrimitive(false))))
+            }
+    }
+    private suspend fun prefetched(stream: String, frame: JsonObject) {
+        val id = prefetching.remove(stream) ?: return
+        mux?.cancel(stream)
+        val v = frame["value"].obj()
+        if (frame.text("type") != "item" || v.text("type") != "snapshot") return
+        val next = SessionJournal()
+        val messages = withContext(Dispatchers.Default) { next.accept(v); next.messages() }
+        if (sessionViews[id] != null) return
+        val model = next.projections["modelSelection"].obj()["next"].obj().ifEmpty { defaultModel }
+        if (id != state.value.selectedId) sessionViews.put(id, SessionViewCache.View(messages, model, next.hasMore))
+        // Opened while warming: show this history until the live follow snapshot takes over.
+        else if (state.value.loading && !journal.initialized) mutable.update { it.copy(messages = messages, selectedModel = model, hasMore = next.hasMore, loading = false) }
+    }
     private suspend fun process(frame: JsonObject) {
         val stream = frame.text("streamId")
+        if (stream in prefetching) { prefetched(stream, frame); return }
         if (frame.text("type") == "error") {
             val e = frame["error"].obj()
             if (stream == "events") throw HarnessException(e.text("code"), e.text("message"))
@@ -296,9 +325,12 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             followId -> {
                 val messages = if (v.text("type") == "snapshot") {
                     // Large histories (including tool output) must not stall taps or drawer animation.
+                    val received = android.os.SystemClock.elapsedRealtime()
                     val next = SessionJournal()
                     val result = withContext(Dispatchers.Default) { next.accept(v); next.messages() }
                     if (stream != followId) return // A newer selection owns the screen now.
+                    val parsed = android.os.SystemClock.elapsedRealtime()
+                    log("打开会话：${v["records"].array().size} 条记录，${if (state.value.loading) "无缓存" else "有缓存"}，服务器 ${received - followStartedAt}ms，解析 ${parsed - received}ms")
                     journal = next
                     result
                 } else {
@@ -306,6 +338,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     journal.messages()
                 }
                 val model = journal.projections["modelSelection"].obj()["next"].obj()
+                if (messages.isNotEmpty()) markUsed(state.value.selectedId)
                 mutable.update { it.copy(messages = messages, loading = false, syncing = false, hasMore = journal.hasMore,
                     selectedModel = if (v.text("type") == "snapshot") model.ifEmpty { defaultModel } else it.selectedModel,
                     queued = if (v.text("type") == "event" && v["event"].obj().text("type") == "user/message") false else it.queued) }
@@ -351,12 +384,17 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private fun processControl(v: JsonObject) {
         fun applyProjection(id: String, key: String, value: JsonElement?) {
             if (key == "title") mutable.update { it.copy(sessions = it.sessions.map { s -> if (s.id == id && value.string().isNotBlank()) s.copy(title = value.string()) else s }) }
+            if (key == "sessionListMetadata" && !value.obj().flag("blank")) markUsed(id)
             if (key == "modelSelection" && id == state.value.selectedId) mutable.update { it.copy(selectedModel = value.obj()["next"].obj().ifEmpty { defaultModel }) }
         }
         when (v.text("type")) {
             "baseline" -> v["value"].obj()["projections"].obj().forEach { (id, p) -> p.obj()["values"].obj().forEach { (key, value) -> applyProjection(id, key, value) } }
             "projection" -> applyProjection(v.text("sessionId"), v.text("key"), v["value"])
         }
+    }
+    private fun markUsed(id: String?) {
+        if (state.value.sessions.none { it.id == id && it.blank }) return
+        mutable.update { it.copy(sessions = it.sessions.map { s -> if (s.id == id) s.copy(blank = false) else s }) }
     }
     private fun processWorkspace(v: JsonObject) {
         when (v.text("type")) {
@@ -420,8 +458,9 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         journal = SessionJournal()
         val streamId = "session-${UUID.randomUUID()}"; followId = streamId
         mutable.update { it.copy(syncing = true) }
+        followStartedAt = android.os.SystemClock.elapsedRealtime()
         mux?.open(streamId, "session/follow", jsonObject("request" to jsonObject(
-            "address" to address(id), "maxMessages" to JsonPrimitive(60), "assistantStream" to JsonPrimitive(true))))
+            "address" to address(id), "maxMessages" to JsonPrimitive(INITIAL_MESSAGES), "assistantStream" to JsonPrimitive(true))))
         loadCommands()
     }
     fun loadCommands() {
@@ -492,7 +531,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     "workspaceId" to workspaceId?.let(::str), "cwd" to cwd.trim().takeIf { it.isNotBlank() && workspaceId == null }?.let(::str), "agentPreset" to preset?.let(::str))).obj()
                 if (api !== client) return@launch
                 val id = v.text("sessionId").ifBlank { throw HarnessException("protocol/create", "服务器未返回新会话编号") }
-                val row = SessionSummary(id, "新对话", directory, System.currentTimeMillis(), false)
+                val row = SessionSummary(id, "新对话", directory, System.currentTimeMillis(), false, blank = true)
                 // The added event supplies full metadata. Never wait for another session/list RPC.
                 mutable.update { it.copy(sessions = if (it.sessions.any { s -> s.id == id }) it.sessions else listOf(row) + it.sessions,
                     creating = false, creatingSessionId = null) }
@@ -699,5 +738,9 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     private fun fail(e: Exception) { if (e is CancellationException) throw e; mutable.update { it.copy(error = e.message ?: "操作失败，请重试") } }
     private fun address(id: String) = jsonObject("kind" to str("session"), "sessionId" to str(id))
+    private companion object {
+        const val INITIAL_MESSAGES = 30
+        const val PREFETCH_SESSIONS = 4
+    }
     override fun onCleared() { log("界面已销毁，释放实时连接"); stop(stopMonitor = false); super.onCleared() }
 }

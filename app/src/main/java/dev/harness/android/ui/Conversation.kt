@@ -71,6 +71,9 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
                 following = !canScrollForward
             }
         }
+        // Item 0 is the history row, so the newest message is item messages.size. Hide the jump
+        // button once any part of it is on screen instead of only at the very end of the list.
+        val newestVisible by remember(messages.size) { derivedStateOf { list.layoutInfo.visibleItemsInfo.any { it.index >= messages.size } } }
         val tail = state.messages.lastOrNull()
         LaunchedEffect(state.messages.size, tail?.text?.length, tail?.reasoning?.length, tail?.arguments?.length) {
             if (following && messages.isNotEmpty()) list.scrollToItem(messages.size)
@@ -105,7 +108,7 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
                     }
                 }
             }
-            if (list.canScrollForward && messages.isNotEmpty()) SmallFloatingActionButton(onClick = { following = true; scope.launch { list.animateScrollToItem(messages.size) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = MaterialTheme.colorScheme.surface) { Icon(Icons.Default.ArrowDownward, "跳到最新消息") }
+            if (!newestVisible && messages.isNotEmpty()) SmallFloatingActionButton(onClick = { following = true; scope.launch { list.animateScrollToItem(messages.size) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = MaterialTheme.colorScheme.surface) { Icon(Icons.Default.ArrowDownward, "跳到最新消息") }
         }
     }
 }

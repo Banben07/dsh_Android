@@ -85,8 +85,8 @@ fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dis
                 if (notifications != null) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("回复完成通知", style = MaterialTheme.typography.bodyMedium)
-                            Text("开启时同时保持后台连接，点击提醒返回会话。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("回复完成与待处理通知", style = MaterialTheme.typography.bodyMedium)
+                            Text("回复完成、需要确认操作或回答问题时提醒。开启时同时保持后台连接，点击提醒返回会话。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(state.notifications, { enabled ->
                             if (enabled && Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)

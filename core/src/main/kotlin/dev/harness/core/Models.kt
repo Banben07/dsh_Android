@@ -5,13 +5,15 @@ import kotlinx.serialization.json.*
 data class SessionSummary(
     val id: String, val title: String, val cwd: String, val updatedAt: Long,
     val running: Boolean, val isChild: Boolean = false,
+    /** Harness marks a session blank until its first committed conversation event. */
+    val blank: Boolean = false,
 ) {
     companion object {
         fun parse(value: JsonObject): SessionSummary {
             val id = value.text("sessionId")
             return SessionSummary(id,
                 value["projections"].obj()["values"].obj()["title"].string().ifBlank { "新会话 · ${id.take(6)}" },
-                value.text("cwd"), value.long("updatedAt"), value.flag("running"), value.text("origin") == "subagent")
+                value.text("cwd"), value.long("updatedAt"), value.flag("running"), value.text("origin") == "subagent", value.flag("blank"))
         }
     }
 }
