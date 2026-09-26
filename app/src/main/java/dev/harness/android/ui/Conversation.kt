@@ -67,8 +67,8 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
         val scope = rememberCoroutineScope()
         var following by remember { mutableStateOf(true) }
         LaunchedEffect(list) {
-            snapshotFlow { list.isScrollInProgress }.distinctUntilChanged().collect { moving ->
-                if (moving) following = !list.canScrollForward
+            snapshotFlow { list.canScrollForward }.distinctUntilChanged().collect { canScrollForward ->
+                following = !canScrollForward
             }
         }
         val tail = state.messages.lastOrNull()
@@ -105,7 +105,7 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
                     }
                 }
             }
-            if (!following && messages.isNotEmpty()) SmallFloatingActionButton(onClick = { following = true; scope.launch { list.animateScrollToItem(messages.size) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = MaterialTheme.colorScheme.surface) { Icon(Icons.Default.ArrowDownward, "跳到最新消息") }
+            if (list.canScrollForward && messages.isNotEmpty()) SmallFloatingActionButton(onClick = { following = true; scope.launch { list.animateScrollToItem(messages.size) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = MaterialTheme.colorScheme.surface) { Icon(Icons.Default.ArrowDownward, "跳到最新消息") }
         }
     }
 }

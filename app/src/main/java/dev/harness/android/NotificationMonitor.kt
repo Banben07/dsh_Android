@@ -13,9 +13,10 @@ import java.util.UUID
 
 /** Foreground service keeps the process available for session sockets and optional completion events. */
 class NotificationMonitor : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     private var origin: String? = null
+    private var monitoringNotifications = false
     private val manager by lazy { getSystemService(NotificationManager::class.java) }
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onCreate() {
@@ -29,10 +30,18 @@ class NotificationMonitor : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val store = SessionStore(this)
         if (!store.keepBackgroundConnection || store.server.isBlank()) { stopSelf(); return START_NOT_STICKY }
-        if (job?.isActive == true && origin == store.server) return START_STICKY
+        val shouldMonitor = store.notifications
+        if (job?.isActive == true && origin == store.server && monitoringNotifications == shouldMonitor) return START_STICKY
         job?.cancel(); origin = store.server
-        job = scope.launch { monitor(store.server, store) }
+        monitoringNotifications = shouldMonitor
+        job = scope.launch {
+            if (shouldMonitor) monitor(store.server, store) else keepProcessAlive()
+        }
         return START_STICKY
+    }
+    private suspend fun keepProcessAlive() {
+        manager.notify(ONGOING_ID, connectionNotification("后台保持应用连接"))
+        while (currentCoroutineContext().isActive) delay(15_000)
     }
     private fun openApp(sessionId: String? = null): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -53,7 +62,6 @@ class NotificationMonitor : Service() {
                         val first = withTimeout(20_000) { mux.frames.receive() }
                         val ready = first["value"].obj()
                         if (first.text("streamId") != "events" || ready.text("type") != "ready") throw HarnessException("protocol/ready", "消息服务握手失败")
-                        val clientId = ready.text("clientId")
                         val pending = mutableMapOf<String, String>()
                         fun inspect(id: String) {
                             if (!store.notifications) return
@@ -76,10 +84,6 @@ class NotificationMonitor : Service() {
                             if (frame.text("type") != "item") continue
                             val v = frame["value"].obj()
                             if (stream == "events") {
-                                if (v.text("type") == "waterfall") {
-                                    // This observer must never claim an approval or question from the foreground UI.
-                                    api.rpc("\$events/result", jsonObject("clientId" to str(clientId), "eventId" to v["eventId"], "outcome" to jsonObject("kind" to str("next"))))
-                                }
                                 if (v.text("type") == "emit") {
                                     val args = v["args"].array(); val id = args.firstOrNull().string()
                                     when (v.text("event")) {

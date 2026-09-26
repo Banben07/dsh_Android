@@ -23,6 +23,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import dev.harness.android.*
 import dev.harness.core.*
 import kotlinx.coroutines.launch
@@ -59,11 +61,11 @@ fun HarnessApp(state: HarnessState, vm: HarnessViewModel) {
                         },
                         navigationIcon = { if (!wide) IconButton(onClick = { scope.launch { drawer.open() } }) { Icon(Icons.Default.Menu, "打开会话列表") } },
                         actions = {
+                            if (state.selectedId != null) IconButton(onClick = { renaming = true }, enabled = state.connected && !state.creatingSelected) { Icon(Icons.Default.Edit, "重命名会话", modifier = Modifier.size(20.dp)) }
+                            // Keep the new conversation action at the far right for quick access.
                             IconButton(onClick = openNew, enabled = state.connected && !state.creating) {
                                 Icon(Icons.Default.Add, "新建对话", modifier = Modifier.size(24.dp))
                             }
-                            if (state.selectedId != null) IconButton(onClick = { renaming = true }, enabled = state.connected && !state.creatingSelected) { Icon(Icons.Default.Edit, "重命名会话", modifier = Modifier.size(20.dp)) }
-                            IconButton(onClick = vm::settings) { Icon(Icons.Default.Tune, "连接设置") }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
                     )
@@ -254,6 +256,8 @@ private fun Composer(state: HarnessState, vm: HarnessViewModel, onModel: () -> U
         if (uri != null) vm.exportSession(exportServer, exportSession, uri)
     }
     val sendingHere = state.sendingSessionId == state.selectedId
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     fun setDraft(value: String) { draft = value; vm.setDraft(value) }
     fun localCommand(name: String): Boolean {
         when (name) {
@@ -315,6 +319,8 @@ private fun Composer(state: HarnessState, vm: HarnessViewModel, onModel: () -> U
                         }
                         FilledIconButton(onClick = {
                             val submitted = draft
+                            keyboard?.hide()
+                            focusManager.clearFocus(force = true)
                             if (!submitted.trim().startsWith("/") || !localCommand(submitted.trim().drop(1))) {
                                 vm.send(submitted, steer) { if (draft == submitted) setDraft("") }
                             }

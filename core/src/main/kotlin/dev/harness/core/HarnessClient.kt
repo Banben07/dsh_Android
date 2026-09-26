@@ -143,6 +143,8 @@ class HarnessClient internal constructor(val address: ServerAddress, private val
 class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
     val frames = Channel<JsonObject>(1024)
     @Volatile private var closed = false
+    @Volatile var failed = false
+        private set
     private val socket = http.newWebSocket(request, object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             webSocket.send(openFrame("events", "\$events", emptyObject).toString())
@@ -159,10 +161,12 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
             }
         }
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            failed = true
             frames.close(response?.failure() ?: t)
         }
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, null) }
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            failed = true
             frames.close(if (closed) null else HarnessException("stream/closed", "连接已断开"))
         }
     })

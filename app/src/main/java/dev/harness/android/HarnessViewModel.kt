@@ -62,9 +62,6 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private var commandsJob: Job? = null
     private val sessionViews = SessionViewCache()
     private var wasBackgrounded = false
-    private var resumeCheckJob: Job? = null
-    private var resumeCheckId: String? = null
-    private var resumeCheckResult: CompletableDeferred<Unit>? = null
 
     fun draft(): String = drafts[state.value.selectedId.orEmpty()].orEmpty()
     fun setDraft(text: String) { drafts[state.value.selectedId.orEmpty()] = text }
@@ -118,8 +115,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         if (connectionJob?.isActive == true) {
             if (state.value.connected && store.keepBackgroundConnection && NotificationMonitor.appVisible) startBackgroundConnection()
             if (returning && !state.value.showConnection) {
-                if (state.value.connection == ConnectionStatus.RETRYING) reconnect()
-                else if (state.value.connected) checkResumedConnection()
+                if (state.value.connection == ConnectionStatus.RETRYING || mux?.failed == true) reconnect()
             }
             return
         }
@@ -129,7 +125,6 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     fun pause() {
         wasBackgrounded = true
-        resumeCheckJob?.cancel()
         pauseJob?.cancel()
         if (store.keepBackgroundConnection) return
         pauseJob = viewModelScope.launch {
@@ -138,33 +133,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             mutable.update { it.copy(connection = ConnectionStatus.OFFLINE, pending = emptyList()) }
         }
     }
-    fun reconnect() { resumeCheckJob?.cancel(); pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); start(null) }
-    private fun checkResumedConnection() {
-        val active = mux ?: return
-        resumeCheckJob?.cancel()
-        resumeCheckJob = viewModelScope.launch {
-            val id = "resume-${UUID.randomUUID()}"
-            val result = CompletableDeferred<Unit>()
-            resumeCheckId = id; resumeCheckResult = result
-            var failed = false
-            try {
-                // A read-only subscription baseline verifies this exact WebSocket and VPN route.
-                // HTTP success alone cannot tell us whether the old socket survived backgrounding.
-                active.open(id, "workspace/follow")
-                withTimeout(5_000) { result.await() }
-            } catch (e: Exception) {
-                if (e is CancellationException && e !is TimeoutCancellationException) throw e
-                failed = true
-            } finally {
-                active.cancel(id)
-                if (resumeCheckId == id) { resumeCheckId = null; resumeCheckResult = null }
-            }
-            if (failed && mux === active && state.value.connected) {
-                resumeCheckJob = null
-                reconnect()
-            }
-        }
-    }
+    fun reconnect() { pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); start(null) }
     fun logout() {
         stop(); store.forgetCookies(); client = null
         sessionViews.clear(); journal = SessionJournal(); drafts.clear(); mutable.update { HarnessState(server = it.server, showConnection = true, defaults = store.defaults(it.server), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) }
@@ -172,7 +141,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private fun stop(stopMonitor: Boolean = true) {
         val incompleteId = state.value.creatingSessionId
         sendJob?.cancel(); activeSendId = null
-        exportJob?.cancel(); createJob?.cancel(); commandsJob?.cancel(); resumeCheckJob?.cancel()
+        exportJob?.cancel(); createJob?.cancel(); commandsJob?.cancel()
         mutable.update { it.copy(exporting = false, archivingSessionId = null, creating = false, creatingSessionId = null,
             selectedId = if (it.selectedId == incompleteId) null else it.selectedId) }
         if (stopMonitor) NotificationMonitor.stop(getApplication())
@@ -277,13 +246,6 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     private suspend fun process(frame: JsonObject) {
         val stream = frame.text("streamId")
-        if (stream == resumeCheckId) {
-            when (frame.text("type")) {
-                "item" -> resumeCheckResult?.complete(Unit)
-                "error", "end" -> resumeCheckResult?.completeExceptionally(HarnessException("stream/resume", "连接检查未完成"))
-            }
-            return
-        }
         if (frame.text("type") == "error") {
             val e = frame["error"].obj()
             if (stream == "events") throw HarnessException(e.text("code"), e.text("message"))
