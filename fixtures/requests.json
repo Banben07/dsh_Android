@@ -1,0 +1,16 @@
+[
+  {"endpoint":"session/list","args":{"_request":{}}},
+  {"endpoint":"session/create","args":{"request":{"sessionId":"android-test","cwd":"/tmp/project","agentPreset":"standard"}}},
+  {"endpoint":"session/create","args":{"request":{"sessionId":"android-test","workspaceId":"workspace-test"}}},
+  {"endpoint":"session/follow","args":{"request":{"address":{"kind":"session","sessionId":"android-test"},"maxMessages":60,"assistantStream":true}}},
+  {"endpoint":"session/page","args":{"request":{"address":{"kind":"session","sessionId":"android-test"},"throughSeq":120,"beforeSeq":60,"maxMessages":60}}},
+  {"endpoint":"session/prompt","args":{"request":{"requestId":"prompt-1","sessionId":"android-test","mode":"queue","content":[{"type":"text","text":"你好"}],"clientTimeZone":"Asia/Shanghai"}}},
+  {"endpoint":"session/prompt","args":{"request":{"requestId":"prompt-2","sessionId":"android-test","mode":"steer","content":[{"type":"text","text":"调整任务"}],"clientTimeZone":"Asia/Shanghai"}}},
+  {"endpoint":"session/cancel","args":{"request":{"sessionId":"android-test"}}},
+  {"endpoint":"session/rename","args":{"request":{"sessionId":"android-test","title":"安卓会话"}}},
+  {"endpoint":"session/selectModel","args":{"request":{"sessionId":"android-test","provider":"deepseek","model":"deepseek-chat"}}},
+  {"endpoint":"session/modelCatalog","args":{}},
+  {"endpoint":"session/control","args":{}},
+  {"endpoint":"workspace/follow","args":{}},
+  {"endpoint":"agentPresets/list","args":{}}
+]
