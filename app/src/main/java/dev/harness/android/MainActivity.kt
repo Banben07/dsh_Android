@@ -1,6 +1,7 @@
 package dev.harness.android
 
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -19,6 +20,7 @@ class MainActivity : ComponentActivity() {
     private val model: HarnessViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        model.openNotification(intent.getStringExtra("server"), intent.getStringExtra("sessionId"))
         enableEdgeToEdge()
         setContent {
             HarnessTheme {
@@ -39,6 +41,13 @@ class MainActivity : ComponentActivity() {
                 HarnessApp(state, model)
             }
         }
+    }
+    override fun onStart() { NotificationMonitor.appVisible = true; super.onStart() }
+    override fun onStop() { NotificationMonitor.appVisible = false; super.onStop() }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        model.openNotification(intent.getStringExtra("server"), intent.getStringExtra("sessionId"))
     }
 }
 

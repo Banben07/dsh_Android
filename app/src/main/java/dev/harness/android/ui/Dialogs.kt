@@ -16,27 +16,67 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import android.Manifest
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
 import dev.harness.android.*
 import dev.harness.core.*
 import kotlinx.serialization.json.*
 
 @Composable
-fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dismiss: () -> Unit, logout: () -> Unit) {
+fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dismiss: () -> Unit, logout: () -> Unit,
+    defaults: (() -> Unit)? = null, notifications: ((Boolean) -> Unit)? = null, testConnection: ((String) -> Unit)? = null) {
     var server by remember { mutableStateOf(state.server) }
     var token by remember { mutableStateOf("") } // Intentionally not saveable: never persist a launch token.
     var visible by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var notificationDenied by remember { mutableStateOf(false) }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        notifications?.invoke(granted); notificationDenied = !granted
+    }
     Dialog(onDismissRequest = dismiss, properties = DialogProperties(dismissOnClickOutside = state.connected)) {
         Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surface) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 BrandMark(46)
-                Text("连接你的 Harness", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                Text("DeepSeek Harness 设置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 Text("填写手机可以访问的 harness 地址，支持 HTTP、HTTPS，以及带 token 的启动链接。", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 OutlinedTextField(server, { server = it }, label = { Text("服务地址") }, placeholder = { Text("192.168.1.10:3000 或 https://harness.example.com") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), leadingIcon = { Icon(Icons.Default.Dns, null, Modifier.size(20.dp)) })
                 OutlinedTextField(token, { token = it }, label = { Text("启动 Token") }, supportingText = { Text("首次登录需要；已有 Cookie 时可留空。这里不是 DeepSeek API Key。") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
                     visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(), trailingIcon = { IconButton(onClick = { visible = !visible }) { Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (visible) "隐藏 Token" else "显示 Token") } })
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                if (testConnection != null) TextButton(onClick = { testConnection(server) }, enabled = server.isNotBlank() && !state.diagnosing) {
+                    if (state.diagnosing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Icon(Icons.Default.NetworkCheck, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp)); Text(if (state.diagnosing) "正在测试…" else "测试连接")
+                }
+                state.diagnostics?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 Button(onClick = { connect(server, token); token = "" }, modifier = Modifier.fillMaxWidth().height(50.dp), enabled = server.isNotBlank(), shape = RoundedCornerShape(14.dp)) { Icon(Icons.Default.Link, null, Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text("连接服务") }
                 Text("连接 Cookie 使用 Android Keystore 加密保存在本机。模型与工具继续在你的服务器上运行。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (defaults != null) {
+                    HorizontalDivider()
+                    TextButton(onClick = defaults, enabled = state.connected) { Icon(Icons.Default.CreateNewFolder, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("新对话默认设置") }
+                }
+                if (notifications != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("回复完成通知", style = MaterialTheme.typography.bodyMedium)
+                            Text("后台保持连接，点击提醒返回会话。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(state.notifications, { enabled ->
+                            if (enabled && Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            else { notifications(enabled); notificationDenied = false }
+                        })
+                    }
+                    if (notificationDenied) Text("系统未允许通知，可在安卓应用设置中开启。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                val crash = remember { lastCrashReport(context) }
+                if (crash != null) TextButton(onClick = {
+                    context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("DeepSeek Harness 崩溃记录", crash))
+                    android.widget.Toast.makeText(context, "崩溃记录已复制", android.widget.Toast.LENGTH_SHORT).show()
+                }) { Text("复制上次崩溃记录") }
                 if (state.server.isNotBlank()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     TextButton(onClick = logout) { Text("清除登录状态") }
                     TextButton(onClick = dismiss) { Text("返回") }
@@ -47,12 +87,13 @@ fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dis
 }
 
 @Composable
-fun NewSessionDialog(state: HarnessState, onDismiss: () -> Unit, onCreate: (String?, String, String?) -> Unit) {
-    var workspace by rememberSaveable { mutableStateOf<String?>(null) }
-    var cwd by rememberSaveable { mutableStateOf("") }
-    var preset by rememberSaveable { mutableStateOf<String?>(null) }
-    AlertDialog(onDismissRequest = { if (!state.creating) onDismiss() }, title = { Text("新建会话") }, icon = { Icon(Icons.Default.AddComment, null) }, text = {
+fun NewSessionDefaultsDialog(state: HarnessState, onDismiss: () -> Unit, onSave: (SessionDefaults) -> Unit) {
+    var workspace by rememberSaveable { mutableStateOf(state.defaults.workspaceId) }
+    var cwd by rememberSaveable { mutableStateOf(state.defaults.cwd) }
+    var preset by rememberSaveable { mutableStateOf(state.defaults.preset) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("新对话默认设置") }, icon = { Icon(Icons.Default.AddComment, null) }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("保存后，点击新建对话会直接使用这些选项。", style = MaterialTheme.typography.bodySmall)
             Text("工作空间", style = MaterialTheme.typography.labelLarge)
             ChoiceRow(workspace == null, "使用服务器默认目录", "也可以在下方填写路径") { workspace = null }
             state.workspaces.forEach { w -> ChoiceRow(workspace == w.id, w.title.ifBlank { w.path }, w.path) { workspace = w.id } }
@@ -64,7 +105,7 @@ fun NewSessionDialog(state: HarnessState, onDismiss: () -> Unit, onCreate: (Stri
                 state.presets.forEach { p -> ChoiceRow(preset == p.id, p.name, p.description) { preset = p.id } }
             }
         }
-    }, confirmButton = { Button(onClick = { onCreate(workspace, cwd, preset) }, enabled = state.connected && !state.creating) { if (state.creating) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Text("创建会话") } }, dismissButton = { TextButton(onClick = onDismiss, enabled = !state.creating) { Text("取消") } })
+    }, confirmButton = { Button(onClick = { onSave(SessionDefaults(workspace, cwd.trim(), preset)) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable

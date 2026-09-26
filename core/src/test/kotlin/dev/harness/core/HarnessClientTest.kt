@@ -46,6 +46,23 @@ class HarnessClientTest {
         val result = api.listSessions()
         assertTrue(result["items"].array().isEmpty())
     }
+    @Test fun `redirect with an existing valid cookie verifies login without another set-cookie`() = runBlocking {
+        saved += Cookie.Builder().name("dsh_session").value("existing").hostOnlyDomain(server.hostName).path("/").build()
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                assertEquals("dsh_session=existing", request.getHeader("Cookie"))
+                return if (request.method == "GET") MockResponse().setResponseCode(303).setHeader("Location", "/")
+                else response(parseObject(request.body.readUtf8()).text("rpcId"), jsonObject("items" to JsonArray(emptyList())))
+            }
+        }
+        api.login("old-launch-token")
+        assertEquals(2, server.requestCount)
+    }
+    @Test fun `redirect without a usable cookie does not count as successful login`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(303).setHeader("Location", "/"))
+        server.enqueue(MockResponse().setResponseCode(401))
+        assertEquals("auth/required", assertFailsWith<HarnessException> { api.login("invalid") }.code)
+    }
     @Test fun `refuses an unrelated RPC response`() = runBlocking {
         server.enqueue(response("not-this-request", emptyObject))
         val e = assertFailsWith<HarnessException> { api.rpc("session/modelCatalog") }
@@ -88,6 +105,22 @@ class HarnessClientTest {
         delay(150)
         withTimeout(2000) { task.cancelAndJoin() }
         assertTrue(task.isCancelled)
+    }
+    @Test fun `response consumption runs off caller thread and stays cancellable after headers`() = runBlocking {
+        server.enqueue(MockResponse().setBody("hello"))
+        val caller = Thread.currentThread()
+        val transport = OkHttpClient()
+        val readOn = transport.newCall(Request.Builder().url(server.url("/")).build()).readResponse { response ->
+            assertEquals("hello", response.body!!.string())
+            Thread.currentThread()
+        }
+        assertNotSame(caller, readOn)
+        server.enqueue(MockResponse().setBody("{\"slow\":\"response\"}").throttleBody(1, 1, TimeUnit.SECONDS))
+        val task = launch { api.rpc("session/modelCatalog") }
+        delay(200)
+        withTimeout(1500) { task.cancelAndJoin() }
+        assertTrue(task.isCancelled)
+        transport.connectionPool.evictAll()
     }
     private fun response(id: String, value: JsonElement) = MockResponse().setHeader("Content-Type", "application/json").setBody(
         jsonObject("type" to str("server-response"), "rpcId" to str(id), "result" to jsonObject("ok" to JsonPrimitive(true), "value" to value)).toString())

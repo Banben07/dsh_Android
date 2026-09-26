@@ -70,4 +70,12 @@ class SessionJournalTest {
         assertEquals(1, journal.messages().size)
         assertTrue(journal.hasMore)
     }
+    @Test fun `multiple streaming tools without IDs have unique stable list keys`() {
+        val journal = SessionJournal(); journal.accept(snapshot())
+        journal.accept(assistant("""{"type":"start","revision":1,"attemptId":"a1"}"""))
+        journal.accept(assistant("""{"type":"chunk","revision":2,"attemptId":"a1","index":0,"chunk":{"type":"tool-call-delta","index":0,"name":"read","argumentsDelta":"{}"}}"""))
+        journal.accept(assistant("""{"type":"chunk","revision":3,"attemptId":"a1","index":1,"chunk":{"type":"tool-call-delta","index":1,"name":"search","argumentsDelta":"{}"}}"""))
+        val keys = journal.messages().map { it.key }
+        assertEquals(keys.size, keys.toSet().size)
+    }
 }

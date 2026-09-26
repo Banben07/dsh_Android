@@ -112,7 +112,7 @@ class SessionJournal {
                 blocks[index] = jsonObject("type" to str(type), "text" to str(previous.text("text") + c.text("text")))
             }
             "tool-call-delta" -> blocks[index] = jsonObject(
-                "type" to str("tool-call"), "id" to c["id"], "name" to (c["name"] ?: previous["name"]),
+                "type" to str("tool-call"), "id" to (c["id"] ?: previous["id"]), "name" to (c["name"] ?: previous["name"]),
                 "arguments" to str(previous.text("arguments") + c.text("argumentsDelta")),
             )
             "block-end" -> blocks[index] = c["block"].obj()
@@ -124,8 +124,8 @@ class SessionJournal {
             val content = JsonArray(blocks.values.toList())
             result += DisplayMessage("live-$attempt", "assistant", blockText(content),
                 blocks.values.filter { it.text("type") == "reasoning" }.joinToString("\n") { it.text("text") }, streaming = true)
-            blocks.values.filter { it.text("type") == "tool-call" }.forEach { block ->
-                result += DisplayMessage("live-tool-${block.text("id")}", "tool", name = block.text("name"), arguments = block.text("arguments"), streaming = true, callId = block.text("id"))
+            blocks.entries.filter { it.value.text("type") == "tool-call" }.forEach { (index, block) ->
+                result += DisplayMessage("live-tool-$attempt-$index", "tool", name = block.text("name"), arguments = block.text("arguments"), streaming = true, callId = block.text("id"))
             }
         }
         return result
@@ -133,6 +133,7 @@ class SessionJournal {
     private fun durableMessages(): List<DisplayMessage> {
         val result = mutableListOf<DisplayMessage>()
         val toolIndices = mutableMapOf<String, Int>()
+        val commandIndices = mutableMapOf<String, Int>()
         // The journal is an audit timeline: replacements remain visible with a clear context marker.
         events.values.forEach { e ->
             val data = e["data"].obj(); val key = "event-${e.long("seq")}"; val type = e.text("type")
@@ -142,10 +143,22 @@ class SessionJournal {
                 return@forEach
             }
             when (type) {
+                "command/run" -> {
+                    commandIndices[data.text("commandId")] = result.size
+                    result += DisplayMessage(key, "command", "正在执行…", name = "/${data.text("name")}")
+                }
+                "command/done" -> {
+                    val index = commandIndices[data.text("commandId")]
+                    val text = data.text("text").ifBlank { if (data.text("kind") == "error") "执行失败" else "执行完成" }
+                    if (index != null) result[index] = result[index].copy(text = text, isError = data.text("kind") == "error")
+                    else result += DisplayMessage(key, "command", text, name = "命令结果", isError = data.text("kind") == "error")
+                }
                 "user/message" -> {
                     val source = data["source"].obj()
                     val human = source.text("kind") == "user"
-                    result += DisplayMessage(key, if (human) "user" else "context", blockText(data["content"]))
+                    val attachments = if (human) messageAttachments(data["content"]) else emptyList()
+                    val content = if (attachments.isNotEmpty()) JsonArray(data["content"].array().filter { it.obj().text("type") !in listOf("image", "file") }) else data["content"]
+                    result += DisplayMessage(key, if (human) "user" else "context", blockText(content), attachments = attachments)
                 }
                 "assistant/message" -> if (!isPendingSettlement(e)) {
                     val content = data["message"].obj()["content"].array()

@@ -4,6 +4,9 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import dev.harness.android.ui.ConnectionDialog
 import dev.harness.android.ui.QuestionDialog
+import dev.harness.android.ui.ToolActivity
+import dev.harness.android.ui.DraftAttachments
+import dev.harness.android.ui.SlashMenu
 import dev.harness.core.*
 import kotlinx.serialization.json.JsonElement
 import org.junit.Assert.*
@@ -48,5 +51,43 @@ class NativeScreensTest {
         val answer = result.obj()["answers"].array().single().obj()
         assertEquals("branch", answer.text("id"))
         assertEquals("main", answer["selected"].array().single().string())
+    }
+    @Test fun oldToolsStayHiddenUntilHistoryIsExpanded() {
+        val tools = listOf(DisplayMessage("t1", "tool", name = "older-search", result = "ok"), DisplayMessage("t2", "tool", name = "latest-test"))
+        compose.setContent { HarnessTheme { ToolActivity(tools) } }
+        compose.onNodeWithText("latest-test").assertExists()
+        compose.onNodeWithText("older-search").assertDoesNotExist()
+        compose.onNodeWithText("展开历史工具调用（1）").performClick()
+        compose.onNodeWithText("older-search").assertExists()
+    }
+    @Test fun attachmentRemovalIsDisabledDuringTransfer() {
+        val sending = androidx.compose.runtime.mutableStateOf(true)
+        var removed: String? = null
+        val file = DraftAttachment("file-1", android.net.Uri.parse("content://test/document/1"), "report.pdf", "application/pdf", 1024)
+        compose.setContent { HarnessTheme { DraftAttachments(listOf(file), sending.value) { removed = it } } }
+        compose.onNodeWithContentDescription("移除 report.pdf").assertIsNotEnabled()
+        compose.runOnIdle { sending.value = false }
+        compose.onNodeWithContentDescription("移除 report.pdf").performClick()
+        assertEquals("file-1", removed)
+    }
+    @Test fun slashMenuFiltersAndSelectsTheServerCommand() {
+        var selected: String? = null
+        compose.setContent { HarnessTheme { SlashMenu(listOf(SlashCommand("compact", "压缩上下文", "", false), SlashCommand("goal", "设置目标", "目标内容", true)), "go", false, null, {}) { selected = it.name } } }
+        compose.onNodeWithText("/compact").assertDoesNotExist()
+        compose.onNodeWithText("/goal").performClick()
+        assertEquals("goal", selected)
+    }
+    @Test fun newConversationDefaultsAreSavedPerServer() {
+        val store = SessionStore(androidx.test.core.app.ApplicationProvider.getApplicationContext())
+        val expected = SessionDefaults("workspace", "/projects/app", "coding")
+        store.saveDefaults("http://server-one.test", expected)
+        assertEquals(expected, store.defaults("http://server-one.test"))
+        assertEquals(SessionDefaults(), store.defaults("http://server-two.test"))
+    }
+    @Test fun crashReportKeepsStackFramesAndHidesCredentials() {
+        val report = sanitizeCrashReport("IOException https://host/?token=secret\nAuthorization: bearer-token\nat dev.harness.android.MainActivity.onCreate(MainActivity.kt:42)")
+        assertFalse(report.contains("secret"))
+        assertFalse(report.contains("bearer-token"))
+        assertTrue(report.contains("MainActivity.kt:42"))
     }
 }

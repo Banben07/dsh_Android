@@ -2,6 +2,7 @@ package dev.harness.core
 
 import java.io.Closeable
 import java.io.IOException
+import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -27,18 +28,22 @@ class HarnessClient(val address: ServerAddress, cookies: CookieJar) : Closeable 
         .callTimeout(75, TimeUnit.SECONDS)
         .pingInterval(15, TimeUnit.SECONDS)
         .build()
+    private val transferHttp = http.newBuilder().callTimeout(0, TimeUnit.SECONDS).writeTimeout(60, TimeUnit.SECONDS).build()
 
     suspend fun login(token: String) {
         require(token.isNotBlank()) { "请输入启动链接中的 token" }
         val login = address.base.newBuilder().addQueryParameter("token", token).build()
-        http.newCall(request(login).get().build()).await().use { response ->
+        val issuedCookie = http.newCall(request(login).get().build()).readResponse { response ->
             if (response.code !in listOf(200, 302, 303)) throw response.failure()
             // The cookie jar receives Set-Cookie even though redirects are deliberately disabled.
-            if (response.headers("Set-Cookie").isEmpty()) {
-                throw HarnessException("auth/token", "服务没有签发登录 Cookie，请检查启动链接中的 token")
-            }
+            response.headers("Set-Cookie").isNotEmpty()
         }
+        // A still-valid cookie may produce a clean-root redirect without minting another cookie.
+        // Verify it through an authenticated RPC; a redirect or HTML page alone is not proof of login.
+        if (!issuedCookie) listSessions()
     }
+
+    suspend fun probe(): Int = http.newCall(request(address.base).get().build()).readResponse { it.code }
 
     suspend fun rpc(endpoint: String, args: JsonObject = emptyObject): JsonElement {
         val id = UUID.randomUUID().toString()
@@ -46,9 +51,13 @@ class HarnessClient(val address: ServerAddress, cookies: CookieJar) : Closeable 
             "type" to str("client-request"), "rpcId" to str(id), "method" to str(endpoint),
             "payload" to jsonObject("args" to args),
         )
+        return executeRpc(endpoint, id, payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+    }
+
+    private suspend fun executeRpc(endpoint: String, id: String, body: RequestBody, transport: OkHttpClient = http): JsonElement {
         val url = address.base.newBuilder().addPathSegments("api/$endpoint").build()
-        val req = request(url).post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
-        http.newCall(req).await().use { response ->
+        val req = request(url).post(body).build()
+        return transport.newCall(req).readResponse { response ->
             if (!response.isSuccessful) throw response.failure()
             val body = response.body?.string().orEmpty()
             val envelope = try { parseObject(body) } catch (_: Exception) {
@@ -62,7 +71,47 @@ class HarnessClient(val address: ServerAddress, cookies: CookieJar) : Closeable 
                 val err = result["error"].obj()
                 throw HarnessException(err.text("code"), err.text("message").ifBlank { "服务器拒绝了请求" })
             }
-            return result["value"] ?: JsonNull
+            result["value"] ?: JsonNull
+        }
+    }
+
+    suspend fun uploadFile(sessionId: String, source: UploadSource, progress: (Long) -> Unit = {}): UploadedFile {
+        val url = address.base.newBuilder().addPathSegments("api/session/uploadFileBinary")
+            .addQueryParameter("sessionId", sessionId).addQueryParameter("name", source.name).build()
+        return transferHttp.newCall(request(url).post(FileUploadBody(source, progress)).build()).readResponse { response ->
+            if (!response.isSuccessful) throw response.failure()
+            val result = try { parseObject(response.body?.string().orEmpty()) } catch (_: Exception) {
+                throw HarnessException("protocol/upload", "上传接口返回了无效响应，请确认后端支持文件上传")
+            }
+            if (!result.flag("ok")) {
+                val error = result["error"].obj()
+                throw HarnessException(error.text("code").ifBlank { "upload/failed" }, error.text("message").ifBlank { "文件上传失败" })
+            }
+            val value = result["value"].obj(); val file = value["file"].obj()
+            if (value.text("receiptId").isBlank()) throw HarnessException("protocol/upload", "服务器没有返回文件上传凭据")
+            UploadedFile(value.text("receiptId"), file.text("name").ifBlank { source.name }, file.long("bytes", source.size ?: 0))
+        }
+    }
+
+    suspend fun prompt(request: JsonObject, content: List<PromptPart>, progress: (Int, Long) -> Unit = { _, _ -> }): JsonElement {
+        val id = UUID.randomUUID().toString()
+        return executeRpc("session/prompt", id, PromptBody(id, request, content, progress), transferHttp)
+    }
+    suspend fun executeCommand(agentId: String, line: String, attachments: List<PromptPart>, progress: (Int, Long) -> Unit = { _, _ -> }): JsonElement {
+        val id = UUID.randomUUID().toString()
+        val args = jsonObject("agentId" to str(agentId), "line" to str(line))
+        return executeRpc("commands/execute", id, PromptBody(id, args, attachments, progress, command = true), transferHttp.newBuilder().readTimeout(0, TimeUnit.SECONDS).build())
+    }
+
+    /** Open the destination only after a successful authenticated ZIP response. Never buffer the archive. */
+    suspend fun exportSession(sessionId: String, destination: () -> OutputStream, progress: (Long) -> Unit = {}): Long {
+        val url = address.base.newBuilder().addPathSegments("api/session.export")
+            .addQueryParameter("sessionId", sessionId).addQueryParameter("includeDescendants", "true").build()
+        return transferHttp.newCall(request(url).get().build()).readResponse { response ->
+            if (!response.isSuccessful) throw response.failure()
+            val body = response.body ?: throw HarnessException("export/empty", "服务器没有返回会话文件")
+            if (body.contentType()?.subtype != "zip") throw HarnessException("export/format", "导出接口没有返回 ZIP 文件，请检查后端版本")
+            destination().use { output -> body.byteStream().use { input -> copyTransfer(input, output, progress) } }
         }
     }
 
@@ -70,7 +119,7 @@ class HarnessClient(val address: ServerAddress, cookies: CookieJar) : Closeable 
     // The generated Session Controller names this one parameter `_request` on the wire.
     suspend fun listSessions(): JsonObject = rpc("session/list", jsonObject("_request" to emptyObject)).obj()
     fun mux(): HarnessMux = HarnessMux(http, request(address.base.newBuilder().addPathSegments("api/remote.mux").build()).build())
-    private fun request(url: HttpUrl) = Request.Builder().url(url).header("Origin", address.origin).header("User-Agent", "HarnessAndroid/0.1")
+    private fun request(url: HttpUrl) = Request.Builder().url(url).header("Origin", address.origin).header("User-Agent", "HarnessAndroid/0.2")
     override fun close() { http.dispatcher.cancelAll(); http.connectionPool.evictAll() }
 }
 
@@ -113,12 +162,18 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
     }
 }
 
-internal suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->
+/** Read and decode the response on OkHttp's worker, keeping cancellation active through the entire body. */
+internal suspend fun <T> Call.readResponse(read: (Response) -> T): T = suspendCancellableCoroutine { continuation ->
     continuation.invokeOnCancellation { cancel() }
     enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) { if (continuation.isActive) continuation.resumeWithException(e) }
         override fun onResponse(call: Call, response: Response) {
-            continuation.resume(response) { _, value, _ -> value.close() }
+            try {
+                val value = response.use(read)
+                if (continuation.isActive) continuation.resume(value)
+            } catch (e: Exception) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
         }
     })
 }

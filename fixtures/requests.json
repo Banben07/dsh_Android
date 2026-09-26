@@ -12,5 +12,10 @@
   {"endpoint":"session/modelCatalog","args":{}},
   {"endpoint":"session/control","args":{}},
   {"endpoint":"workspace/follow","args":{}},
-  {"endpoint":"agentPresets/list","args":{}}
+  {"endpoint":"agentPresets/list","args":{}},
+  {"endpoint":"commands/list","args":{"agentId":"android-test"}},
+  {"endpoint":"commands/execute","args":{"agentId":"android-test","line":"/compact","submittedAttachments":[]}},
+  {"endpoint":"commands/execute","args":{"agentId":"android-test","line":"/goal analyze attachments","submittedAttachments":[{"type":"image","mediaType":"image/png","data":"AQID","name":"test.png"},{"type":"file","receiptId":"receipt-1"}]}},
+  {"endpoint":"session/prompt","args":{"request":{"requestId":"prompt-attachments","sessionId":"android-test","mode":"queue","content":[{"type":"image","mediaType":"image/png","data":"AQID","name":"test.png"},{"type":"file","receiptId":"receipt-1"}]}}},
+  {"endpoint":"session/attachment","args":{"request":{"sessionId":"android-test","attachmentId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
 ]

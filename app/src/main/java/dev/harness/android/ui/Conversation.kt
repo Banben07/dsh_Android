@@ -32,7 +32,10 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) {
-    key(state.selectedId) {
+    key(state.server, state.selectedId) {
+        val tools = state.messages.filter { it.kind == "tool" }
+        val latestTool = tools.lastOrNull()?.key
+        val messages = state.messages.filter { it.kind != "tool" || it.key == latestTool }
         val list = rememberLazyListState()
         val scope = rememberCoroutineScope()
         var following by remember { mutableStateOf(true) }
@@ -43,7 +46,7 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
         }
         val tail = state.messages.lastOrNull()
         LaunchedEffect(state.messages.size, tail?.text?.length, tail?.reasoning?.length, tail?.arguments?.length) {
-            if (following && state.messages.isNotEmpty()) list.scrollToItem(state.messages.size)
+            if (following && messages.isNotEmpty()) list.scrollToItem(messages.size)
         }
         Box(modifier.fillMaxWidth()) {
             LazyColumn(state = list, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
@@ -55,9 +58,10 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
                         }
                     }
                 }
-                items(state.messages, key = { it.key }) { message ->
+                items(messages, key = { if (it.kind == "tool") "tool-activity" else it.key }) { message ->
                     Box(Modifier.fillMaxWidth(), contentAlignment = if (message.kind == "user") Alignment.CenterEnd else Alignment.CenterStart) {
-                        MessageCard(message, Modifier.widthIn(max = 740.dp))
+                        if (message.kind == "tool") ToolActivity(tools, Modifier.widthIn(max = 740.dp))
+                        else MessageCard(message, Modifier.widthIn(max = 740.dp), loadImage = { attachmentId -> vm.readImage(state.selectedId.orEmpty(), attachmentId) })
                     }
                 }
                 if (state.messages.isEmpty() && !state.loading) item {
@@ -69,16 +73,19 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
                 }
                 if (state.loading) item { Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp) } }
             }
-            if (!following && state.messages.isNotEmpty()) SmallFloatingActionButton(onClick = { following = true; scope.launch { list.animateScrollToItem(state.messages.size) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = MaterialTheme.colorScheme.surface) { Icon(Icons.Default.ArrowDownward, "跳到最新消息") }
+            if (!following && messages.isNotEmpty()) SmallFloatingActionButton(onClick = { following = true; scope.launch { list.animateScrollToItem(messages.size) } }, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = MaterialTheme.colorScheme.surface) { Icon(Icons.Default.ArrowDownward, "跳到最新消息") }
         }
     }
 }
 
 @Composable
-fun MessageCard(message: DisplayMessage, modifier: Modifier = Modifier) {
+fun MessageCard(message: DisplayMessage, modifier: Modifier = Modifier, loadImage: (suspend (String) -> ByteArray)? = null) {
     when (message.kind) {
         "user" -> Surface(modifier, color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp)) {
-            SelectionContainer { Text(message.text, Modifier.padding(horizontal = 18.dp, vertical = 14.dp), style = MaterialTheme.typography.bodyLarge) }
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
+                if (message.text.isNotBlank()) SelectionContainer { Text(message.text, style = MaterialTheme.typography.bodyLarge) }
+                MessageAttachments(message.attachments, loadImage)
+            }
         }
         "assistant" -> Column(modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -103,6 +110,12 @@ fun MessageCard(message: DisplayMessage, modifier: Modifier = Modifier) {
             if (message.streaming && message.text.isEmpty() && message.reasoning.isEmpty()) LinearProgressIndicator(Modifier.padding(top = 16.dp).width(90.dp))
         }
         "tool" -> ToolCard(message, modifier.fillMaxWidth())
+        "command" -> Surface(modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+            Column(Modifier.padding(14.dp)) {
+                Text(message.name, style = MaterialTheme.typography.labelLarge)
+                Text(message.text, style = MaterialTheme.typography.bodySmall, color = if (message.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         "context" -> {
             var expanded by rememberSaveable(message.key) { mutableStateOf(false) }
             Column(modifier) {
@@ -111,6 +124,29 @@ fun MessageCard(message: DisplayMessage, modifier: Modifier = Modifier) {
             }
         }
         else -> Text(message.text, modifier, style = MaterialTheme.typography.bodySmall, color = if (message.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+fun ToolActivity(tools: List<DisplayMessage>, modifier: Modifier = Modifier) {
+    val latest = tools.lastOrNull() ?: return
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    var visibleCount by rememberSaveable { mutableIntStateOf(20) }
+    Column(modifier.fillMaxWidth()) {
+        Text("最新工具调用", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
+        ToolCard(latest, Modifier.fillMaxWidth())
+        if (tools.size > 1) {
+            TextButton(onClick = { expanded = !expanded }) {
+                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp)); Text("${if (expanded) "收起" else "展开"}历史工具调用（${tools.size - 1}）", style = MaterialTheme.typography.labelMedium)
+            }
+            if (expanded) {
+                tools.dropLast(1).asReversed().take(visibleCount).forEach { tool ->
+                    key(tool.key) { Box(Modifier.padding(top = 6.dp)) { ToolCard(tool, Modifier.fillMaxWidth()) } }
+                }
+                if (tools.size - 1 > visibleCount) TextButton(onClick = { visibleCount += 20 }) { Text("查看更多历史调用") }
+            }
+        }
     }
 }
 
