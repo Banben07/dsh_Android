@@ -132,7 +132,7 @@ class HarnessClient internal constructor(val address: ServerAddress, private val
     suspend fun command(endpoint: String, request: JsonObject): JsonElement = rpc(endpoint, jsonObject("request" to request))
     // The generated Session Controller names this one parameter `_request` on the wire.
     suspend fun listSessions(): JsonObject = rpc("session/list", jsonObject("_request" to emptyObject)).obj()
-    fun mux(): HarnessMux = HarnessMux(http, request(address.base.newBuilder().addPathSegments("api/remote.mux").build()).build())
+    fun mux(onDisconnect: (String) -> Unit = {}): HarnessMux = HarnessMux(http, request(address.base.newBuilder().addPathSegments("api/remote.mux").build()).build(), onDisconnect)
     private fun request(url: HttpUrl) = Request.Builder().url(url).header("Origin", address.origin).header("User-Agent", "HarnessAndroid/0.2")
     /** Drop stale keep-alive sockets after route changes without cancelling prompts in flight. */
     suspend fun discardIdleConnections() = withContext(Dispatchers.IO) { http.connectionPool.evictAll() }
@@ -143,7 +143,7 @@ class HarnessClient internal constructor(val address: ServerAddress, private val
     }
 }
 
-class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
+class HarnessMux(http: OkHttpClient, request: Request, private val onDisconnect: (String) -> Unit = {}) : Closeable {
     val frames = Channel<JsonObject>(1024)
     @Volatile private var closed = false
     @Volatile var failed = false
@@ -151,6 +151,15 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
     /** Transport-level reason for the last failure or close, for diagnostics only. */
     @Volatile var closeReason: String? = null
         private set
+    private val failureRecorded = AtomicBoolean(false)
+    // Record on the transport thread before publishing failure. The UI may be suspended,
+    // and resume can cancel its frame consumer before that consumer handles the exception.
+    private fun recordFailure(reason: String) {
+        if (closed || !failureRecorded.compareAndSet(false, true)) return
+        closeReason = reason
+        runCatching { onDisconnect(reason) }
+        failed = true
+    }
     private val probes = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val socket = http.newWebSocket(request, object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -161,23 +170,26 @@ class HarnessMux(http: OkHttpClient, request: Request) : Closeable {
                 val frame = parseObject(text)
                 probes.remove(frame.text("streamId"))?.complete(Unit)
                 if (!frames.trySend(frame).isSuccess && !closed) {
+                    recordFailure("stream/overflow: 实时消息队列已满")
                     frames.close(HarnessException("stream/overflow", "实时消息过多，正在重新同步"))
                     webSocket.cancel()
                 }
             } catch (_: Exception) {
+                recordFailure("protocol/frame: 无法读取实时数据")
                 frames.close(HarnessException("protocol/frame", "无法读取实时数据，请检查 harness 版本"))
                 webSocket.cancel()
             }
         }
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            closeReason = "failure ${response?.code?.let { "HTTP $it " }.orEmpty()}${t.javaClass.simpleName}: ${t.message}"
-            failed = true
+            recordFailure("failure ${response?.code?.let { "HTTP $it " }.orEmpty()}${t.javaClass.simpleName}: ${t.message}")
             frames.close(response?.failure() ?: t)
         }
-        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, null) }
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            recordFailure("remote close $code $reason")
+            webSocket.close(code, null)
+        }
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            closeReason = "closed $code $reason"
-            failed = true
+            recordFailure("closed $code $reason")
             frames.close(if (closed) null else HarnessException("stream/closed", "连接已断开"))
         }
     })

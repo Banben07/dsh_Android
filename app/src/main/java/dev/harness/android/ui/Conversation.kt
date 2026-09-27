@@ -62,21 +62,41 @@ fun Conversation(state: HarnessState, vm: HarnessViewModel, modifier: Modifier) 
     key(state.server, state.selectedId) {
         val content = remember(state.messages) { conversationContent(state.messages) }
         val messages = content.messages
-        // Start at the latest visible row, avoiding layout of old Markdown before jumping.
-        val list = rememberLazyListState(initialFirstVisibleItemIndex = messages.size)
+        val saved = remember { state.selectedId?.let(vm::readingPosition) }
+        val list = rememberLazyListState(initialFirstVisibleItemIndex = saved?.index ?: messages.size,
+            initialFirstVisibleItemScrollOffset = saved?.offset ?: 0)
         val scope = rememberCoroutineScope()
-        var following by remember { mutableStateOf(true) }
+        var following by remember { mutableStateOf(saved?.following ?: true) }
+        var restored by remember { mutableStateOf(false) }
+        LaunchedEffect(state.loading, messages.isEmpty(), state.syncing) {
+            if (!restored && !state.loading && (messages.isNotEmpty() || !state.syncing)) {
+                if (saved != null && !saved.following) {
+                    val anchor = messages.indexOfFirst { (if (it.isActivity) "session-activity" else it.key) == saved.key }
+                    list.scrollToItem(if (anchor >= 0) anchor + 1 else saved.index.coerceAtMost(messages.size), saved.offset)
+                } else if (messages.isNotEmpty()) list.scrollToItem(messages.size)
+                restored = true
+            }
+        }
+        DisposableEffect(list) {
+            val server = state.server
+            val id = state.selectedId
+            onDispose {
+                if (id != null && restored) vm.saveReadingPosition(server, id, HarnessViewModel.ReadingPosition(
+                    list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == list.firstVisibleItemIndex }?.key as? String,
+                    list.firstVisibleItemIndex, list.firstVisibleItemScrollOffset, following))
+            }
+        }
         LaunchedEffect(list) {
-            snapshotFlow { list.canScrollForward }.distinctUntilChanged().collect { canScrollForward ->
-                following = !canScrollForward
+            snapshotFlow { list.isScrollInProgress to list.canScrollForward }.distinctUntilChanged().collect { (scrolling, canScrollForward) ->
+                if (restored && scrolling) following = !canScrollForward
             }
         }
         // Item 0 is the history row, so the newest message is item messages.size. Hide the jump
         // button once any part of it is on screen instead of only at the very end of the list.
         val newestVisible by remember(messages.size) { derivedStateOf { list.layoutInfo.visibleItemsInfo.any { it.index >= messages.size } } }
         val tail = state.messages.lastOrNull()
-        LaunchedEffect(state.messages.size, tail?.text?.length, tail?.reasoning?.length, tail?.arguments?.length) {
-            if (following && messages.isNotEmpty()) list.scrollToItem(messages.size)
+        LaunchedEffect(restored, state.messages.size, tail?.text?.length, tail?.reasoning?.length, tail?.arguments?.length) {
+            if (restored && following && !list.isScrollInProgress && messages.isNotEmpty()) list.scrollToItem(messages.size)
         }
         Box(modifier.fillMaxWidth()) {
             LazyColumn(state = list, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {

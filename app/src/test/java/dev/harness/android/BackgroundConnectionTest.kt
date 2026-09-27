@@ -20,6 +20,24 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class BackgroundConnectionTest {
+    @Test fun disconnectReasonSurvivesResumeBeforeTheUiProcessesFailure() = Backend().use { backend ->
+        val model = backend.model
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        model.pause()
+        backend.activeSocket!!.close(1001, "background-disconnect-regression")
+        // Leave the main looper paused, like an app whose UI has not resumed yet.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (ConnectionLog.report(app)?.contains("remote close 1001 background-disconnect-regression") != true && System.nanoTime() < deadline) {
+            Thread.sleep(10)
+        }
+        assertTrue("Transport failure must be recorded without the UI consumer", ConnectionLog.report(app)!!.contains("remote close 1001 background-disconnect-regression"))
+        assertTrue("The UI has not processed the failure yet", model.state.value.connected)
+        model.resume()
+        backend.until { backend.upgrades.get() >= 2 && model.state.value.connected && !model.state.value.syncing }
+        assertTrue(ConnectionLog.report(app)!!.contains("remote close 1001 background-disconnect-regression"))
+        assertEquals("retained conversation", model.state.value.messages.single().text)
+    }
+
     @Test fun returningFromBackgroundChecksAndReusesTheConnectedSocket() = Backend().use { backend ->
         val model = backend.model
         model.pause()
@@ -71,6 +89,7 @@ class BackgroundConnectionTest {
         val requestPaths = ConcurrentLinkedQueue<String>()
         @Volatile var rejectReconnect = false
         @Volatile var failResumeCheck = false
+        @Volatile var activeSocket: WebSocket? = null
         val looper = shadowOf(Looper.getMainLooper())
         val model: HarnessViewModel
         init {
@@ -84,6 +103,7 @@ class BackgroundConnectionTest {
                         upgrades.incrementAndGet()
                         if (rejectReconnect) return MockResponse().setResponseCode(503)
                         return MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                            override fun onOpen(webSocket: WebSocket, response: Response) { activeSocket = webSocket }
                             override fun onMessage(webSocket: WebSocket, text: String) {
                                 val frame = parseObject(text)
                                 val stream = frame.text("streamId")

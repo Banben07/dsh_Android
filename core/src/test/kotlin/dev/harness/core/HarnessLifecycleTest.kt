@@ -84,11 +84,32 @@ class HarnessLifecycleTest {
                 }
             }))
             HarnessClient(ServerAddress.parse(server.url("/").toString()), transport).use { api ->
-                val mux = api.mux()
+                val failures = LinkedBlockingQueue<String>()
+                val mux = api.mux { failures.offer(it) }
                 withTimeout(3000) { mux.frames.receive() }
                 val caller = Thread.currentThread()
                 mux.close()
                 sockets.assertClosedOff(caller)
+                assertNull(failures.poll(200, TimeUnit.MILLISECONDS), "Intentional teardown must not be logged as a transport failure")
+            }
+        }
+    }
+
+    @Test fun `protocol failure is recorded before consumption and not overwritten by cancellation`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) { webSocket.send("invalid-json") }
+            }))
+            HarnessClient(ServerAddress.parse(server.url("/").toString()), OkHttpClient()).use { api ->
+                val failures = LinkedBlockingQueue<String>()
+                api.mux { failures.offer(it) }.use { mux ->
+                    assertEquals("protocol/frame: 无法读取实时数据", failures.poll(3, TimeUnit.SECONDS))
+                    val failure = withTimeout(3000) { mux.frames.receiveCatching() }.exceptionOrNull()
+                    assertEquals("protocol/frame", (failure as HarnessException).code)
+                    assertNull(failures.poll(200, TimeUnit.MILLISECONDS), "Socket cancellation must not replace the original failure")
+                    assertEquals("protocol/frame: 无法读取实时数据", mux.closeReason)
+                }
             }
         }
     }

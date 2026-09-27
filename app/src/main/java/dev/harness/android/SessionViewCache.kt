@@ -3,7 +3,7 @@ package dev.harness.android
 import dev.harness.core.DisplayMessage
 import kotlinx.serialization.json.JsonObject
 
-/** Only immutable display data is retained; every follow still starts from a fresh journal. */
+/** Immutable fallback views survive subscription eviction and transport reconnects. */
 internal class SessionViewCache {
     data class View(val messages: List<DisplayMessage>, val model: JsonObject, val hasMore: Boolean) {
         val characters: Long = messages.sumOf {

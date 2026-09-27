@@ -25,6 +25,26 @@ import org.robolectric.annotation.Config
 class NativeScreensTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun conversationRestoresReadingPositionAcrossSessionSwitches() {
+        val app = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+        val server = "http://reading-position.test"
+        SessionStore(app).server = server
+        val vm = HarnessViewModel(app)
+        val messages = (0 until 80).map { DisplayMessage("row-$it", "user", "阅读位置消息 $it") }
+        val state = androidx.compose.runtime.mutableStateOf(HarnessState(server = server, selectedId = "a", messages = messages))
+        vm.saveReadingPosition(server, "a", HarnessViewModel.ReadingPosition("row-10", 11, 0, false))
+        compose.setContent { HarnessTheme { dev.harness.android.ui.Conversation(state.value, vm, androidx.compose.ui.Modifier) } }
+        compose.onNodeWithText("阅读位置消息 10").assertIsDisplayed()
+        compose.onNode(hasScrollAction()).performScrollToIndex(15)
+        compose.onNodeWithText("阅读位置消息 14").assertIsDisplayed()
+        compose.runOnIdle { state.value = state.value.copy(selectedId = "b", messages = listOf(DisplayMessage("b", "user", "另一会话"))) }
+        compose.onNodeWithText("另一会话").assertIsDisplayed()
+        compose.runOnIdle { state.value = state.value.copy(selectedId = "a", messages = messages) }
+        compose.onNodeWithText("阅读位置消息 14").assertIsDisplayed()
+        compose.onNodeWithContentDescription("跳到最新消息").assertIsDisplayed()
+        compose.runOnIdle { vm.logout() }
+    }
+
     @Test fun connectionFormRequiresAnAddressAndPassesTokenExplicitly() {
         var result: Pair<String, String>? = null
         compose.setContent { HarnessTheme { ConnectionDialog(HarnessState(), { address, token -> result = address to token }, {}, {}) } }

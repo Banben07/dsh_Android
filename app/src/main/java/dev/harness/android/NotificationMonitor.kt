@@ -63,7 +63,7 @@ class NotificationMonitor : Service() {
         while (currentCoroutineContext().isActive) {
             try {
                 HarnessClient(ServerAddress.parse(server), store).use { api ->
-                    api.mux().use { mux ->
+                    api.mux { reason -> ConnectionLog.record(this@NotificationMonitor, "通知连接底层中断：$reason") }.use { mux ->
                         val first = withTimeout(20_000) { mux.frames.receive() }
                         val ready = first["value"].obj()
                         if (first.text("streamId") != "events" || ready.text("type") != "ready") throw HarnessException("protocol/ready", "消息服务握手失败")

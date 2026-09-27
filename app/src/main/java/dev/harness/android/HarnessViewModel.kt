@@ -49,9 +49,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private var connectionJob: Job? = null
     private var pauseJob: Job? = null
     private var clientId: String? = null
-    private var followId: String? = null
     private var epoch = 0L
-    private var journal = SessionJournal()
     private var defaultModel = emptyObject
     private val drafts = mutableMapOf<String, String>()
     private var restoreRecent = true
@@ -64,9 +62,19 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private var wasBackgrounded = false
     private var resumeCheckJob: Job? = null
     private var pausedAt = 0L
-    private var followStartedAt = 0L
-    /** Background snapshot streams (stream id to session id) that warm the view cache for quick switching. */
-    private val prefetching = mutableMapOf<String, String>()
+    // Main-thread ownership; each subscription has its own ordered background reducer.
+    private val liveSessions = LinkedHashMap<String, LiveSession>()
+    private val streams = mutableMapOf<String, LiveSession>()
+    private val retriedSessions = mutableSetOf<String>()
+    private val commandCache = LinkedHashMap<String, List<SlashCommand>>(8, .75f, true)
+    private val scrollPositions = LinkedHashMap<String, ReadingPosition>(8, .75f, true)
+    data class ReadingPosition(val key: String?, val index: Int, val offset: Int, val following: Boolean)
+    fun readingPosition(id: String): ReadingPosition? = scrollPositions[id]
+    fun saveReadingPosition(server: String, id: String, position: ReadingPosition) {
+        if (server != state.value.server) return
+        scrollPositions[id] = position
+        while (scrollPositions.size > 20) scrollPositions.remove(scrollPositions.keys.first())
+    }
 
     fun draft(): String = drafts[state.value.selectedId.orEmpty()].orEmpty()
     fun setDraft(text: String) { drafts[state.value.selectedId.orEmpty()] = text }
@@ -107,7 +115,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         val address = try { ServerAddress.parse(input, token) } catch (e: Exception) { fail(e); return }
         val changed = state.value.server != address.origin
         stop()
-        if (changed) { sessionViews.clear(); drafts.clear(); journal = SessionJournal(); restoreRecent = true }
+        if (changed) { sessionViews.clear(); drafts.clear(); scrollPositions.clear(); restoreRecent = true }
         store.server = address.origin
         mutable.update { if (changed) HarnessState(server = address.origin, showConnection = false, defaults = store.defaults(address.origin), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) else it.copy(showConnection = false, error = null, sending = false, sendingSessionId = null) }
         client = HarnessClient(address.copy(launchToken = null), store)
@@ -140,14 +148,14 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         if (store.keepBackgroundConnection) return
         pauseJob = viewModelScope.launch {
             delay(8_000)
-            connectionJob?.cancel(); mux?.close(); mux = null
+            connectionJob?.cancel(); clearLiveSessions(); mux?.close(); mux = null
             mutable.update { it.copy(connection = ConnectionStatus.OFFLINE, pending = emptyList()) }
         }
     }
-    fun reconnect() { resumeCheckJob?.cancel(); pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); start(null) }
+    fun reconnect() { resumeCheckJob?.cancel(); pauseJob?.cancel(); connectionJob?.cancel(); clearLiveSessions(); mux?.close(); start(null) }
     fun logout() {
         stop(); store.forgetCookies(); client = null
-        sessionViews.clear(); journal = SessionJournal(); drafts.clear(); mutable.update { HarnessState(server = it.server, showConnection = true, defaults = store.defaults(it.server), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) }
+        sessionViews.clear(); drafts.clear(); scrollPositions.clear(); mutable.update { HarnessState(server = it.server, showConnection = true, defaults = store.defaults(it.server), notifications = store.notifications, fontScale = store.fontScale, keepBackgroundConnection = store.keepBackgroundConnection) }
     }
     private fun stop(stopMonitor: Boolean = true) {
         val incompleteId = state.value.creatingSessionId
@@ -156,8 +164,8 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         mutable.update { it.copy(exporting = false, archivingSessionId = null, creating = false, creatingSessionId = null,
             selectedId = if (it.selectedId == incompleteId) null else it.selectedId) }
         if (stopMonitor) NotificationMonitor.stop(getApplication())
-        epoch++; pauseJob?.cancel(); connectionJob?.cancel(); mux?.close(); mux = null
-        client?.close(); clientId = null; followId = null
+        epoch++; pauseJob?.cancel(); connectionJob?.cancel(); clearLiveSessions(); mux?.close(); mux = null
+        client?.close(); clientId = null
     }
     private fun checkResumedConnection() {
         val active = mux ?: return
@@ -196,7 +204,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     // VPN/idle disconnects can invalidate pooled HTTP sockets as well as the mux.
                     // Keep non-idempotent requests non-retrying; discard only unused connections.
                     api.discardIdleConnections()
-                    active = api.mux(); mux = active
+                    active = api.mux { reason -> log("实时连接底层中断：$reason") }; mux = active
                     val first = withTimeout(20_000) { active.frames.receive() }
                     val ready = first["value"].obj()
                     if (first.text("type") != "item" || first.text("streamId") != "events" || ready.text("type") != "ready" || ready.text("clientId").isBlank()) {
@@ -215,7 +223,6 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     active.open("control", "session/control")
                     active.open("workspaces", "workspace/follow")
                     state.value.selectedId?.takeUnless { it == state.value.creatingSessionId }?.let { follow(it) }
-                    prefetchRecent(active)
                     loadCatalog(api, generation)
                     connectedAt = android.os.SystemClock.elapsedRealtime()
                     hasConnected = true
@@ -241,7 +248,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                     retry++
                 } finally {
                     active?.close()
-                    if (mux === active) { mux = null; clientId = null; followId = null; prefetching.clear() }
+                    if (mux === active) { clearLiveSessions(); mux = null; clientId = null }
                 }
                 val cap = minOf(10_000L, 500L shl minOf(retry, 5))
                 delay(if (hasConnected && retry == 1) 250L else Random.nextLong(cap / 2, cap + 1))
@@ -272,78 +279,69 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             } catch (e: Exception) { if (e is CancellationException) throw e }
         }
     }
-    private fun prefetchRecent(active: HarnessMux) {
-        state.value.sessions.asSequence()
-            .filter { !it.isChild && !it.blank && it.id != state.value.selectedId && it.id !in state.value.archived && sessionViews[it.id] == null }
-            .sortedByDescending { it.updatedAt }.take(PREFETCH_SESSIONS)
-            .forEach { session ->
-                val streamId = "prefetch-${UUID.randomUUID()}"
-                prefetching[streamId] = session.id
-                active.open(streamId, "session/follow", jsonObject("request" to jsonObject(
-                    // The follow schema only accepts `assistantStream: true`; omit it rather than send false.
-                    "address" to address(session.id), "maxMessages" to JsonPrimitive(INITIAL_MESSAGES))))
-            }
+    private fun clearLiveSessions() {
+        liveSessions.values.toList().forEach { dropSession(it) }
+        retriedSessions.clear()
+        commandCache.clear()
     }
-    private suspend fun prefetched(stream: String, frame: JsonObject) {
-        val id = prefetching.remove(stream) ?: return
-        mux?.cancel(stream)
-        val v = frame["value"].obj()
-        if (frame.text("type") == "error") log("预取会话失败：${frame["error"].obj().text("code")} ${frame["error"].obj().text("message")}")
-        if (frame.text("type") != "item" || v.text("type") != "snapshot") return
-        val next = SessionJournal()
-        val messages = withContext(Dispatchers.Default) { next.accept(v); next.messages() }
-        if (sessionViews[id] != null) return
-        val model = next.projections["modelSelection"].obj()["next"].obj().ifEmpty { defaultModel }
-        if (id != state.value.selectedId) sessionViews.put(id, SessionViewCache.View(messages, model, next.hasMore))
-        // Opened while warming: show this history until the live follow snapshot takes over.
-        else if (state.value.loading && !journal.initialized) mutable.update { it.copy(messages = messages, selectedModel = model, hasMore = next.hasMore, loading = false) }
+    private fun dropSession(session: LiveSession) {
+        if (liveSessions[session.id] !== session) return
+        session.view?.let { sessionViews.put(session.id, it) }
+        liveSessions.remove(session.id)
+        streams.remove(session.streamId)
+        session.close()
+        mux?.cancel(session.streamId)
     }
-    private suspend fun process(frame: JsonObject) {
-        val stream = frame.text("streamId")
-        if (stream in prefetching) { prefetched(stream, frame); return }
-        if (frame.text("type") == "error") {
-            val e = frame["error"].obj()
-            if (stream == "events") throw HarnessException(e.text("code"), e.text("message"))
-            if (stream == followId) {
-                followId = null
-                mutable.update { it.copy(loading = false, syncing = false, error = e.text("message")) }
-            }
-            return
+    private fun trimLiveSessions() {
+        // Evict least recently visited background subscriptions, never the current screen.
+        while (liveSessions.size > MAX_LIVE_SESSIONS ||
+            liveSessions.values.sumOf { it.latest?.retainedCharacters ?: 0L } > 2_000_000L ||
+            liveSessions.values.any { it.id != state.value.selectedId && (it.view?.messages?.size ?: 0) > 500 }) {
+            val oldest = liveSessions.values.firstOrNull { it.id != state.value.selectedId } ?: break
+            dropSession(oldest)
         }
-        if (frame.text("type") == "end") {
-            if (stream == "events") throw HarnessException("stream/ended", "实时事件流结束")
-            if (stream == followId) {
-                followId = null
-                mutable.update { it.copy(loading = false, syncing = false, error = "会话事件流已结束，请重新打开会话") }
-            }
+    }
+    private fun sessionUpdated(session: LiveSession, update: LiveSession.Update) {
+        if (liveSessions[session.id] !== session) return
+        if (update.view.messages.isNotEmpty()) markUsed(session.id)
+        if (session.id == state.value.selectedId) {
+            val view = session.view ?: return
+            mutable.update { it.copy(messages = view.messages, loading = false, syncing = false,
+                hasMore = view.hasMore, selectedModel = view.model.ifEmpty { defaultModel },
+                queued = if (update.userMessage) false else it.queued) }
+        }
+        trimLiveSessions()
+    }
+    private fun sessionFailed(session: LiveSession, error: Exception) {
+        if (liveSessions[session.id] !== session) return
+        dropSession(session)
+        log("会话订阅中断：${error.javaClass.simpleName}: ${error.message}")
+        if (session.id != state.value.selectedId) return
+        // A gap in one session must not tear down the shared connection or other sessions.
+        if (error is HarnessException && error.code in setOf("journal/gap", "stream/gap", "stream/overflow") &&
+            state.value.connected && retriedSessions.add(session.id)) {
+            followSelected()
+        } else mutable.update { it.copy(loading = false, syncing = false, loadingOlder = false,
+            error = error.message ?: "会话同步失败，请重新打开会话") }
+    }
+    private fun process(frame: JsonObject) {
+        val stream = frame.text("streamId")
+        val session = streams[stream]
+        if (frame.text("type") in listOf("error", "end")) {
+            val e = frame["error"].obj()
+            val failure = HarnessException(e.text("code").ifBlank { "stream/ended" }, e.text("message").ifBlank { "会话事件流已结束，请重新打开会话" })
+            if (stream == "events") throw failure
+            if (session != null) sessionFailed(session, failure)
             return
         }
         if (frame.text("type") != "item") return
-        val v = frame["value"].obj()
+        val value = frame["value"].obj()
         when (stream) {
-            "events" -> processEvent(v)
-            "control" -> processControl(v)
-            "workspaces" -> processWorkspace(v)
-            followId -> {
-                val messages = if (v.text("type") == "snapshot") {
-                    // Large histories (including tool output) must not stall taps or drawer animation.
-                    val received = android.os.SystemClock.elapsedRealtime()
-                    val next = SessionJournal()
-                    val result = withContext(Dispatchers.Default) { next.accept(v); next.messages() }
-                    if (stream != followId) return // A newer selection owns the screen now.
-                    val parsed = android.os.SystemClock.elapsedRealtime()
-                    log("打开会话：${v["records"].array().size} 条记录，${if (state.value.loading) "无缓存" else "有缓存"}，服务器 ${received - followStartedAt}ms，解析 ${parsed - received}ms")
-                    journal = next
-                    result
-                } else {
-                    journal.accept(v)
-                    journal.messages()
-                }
-                val model = journal.projections["modelSelection"].obj()["next"].obj()
-                if (messages.isNotEmpty()) markUsed(state.value.selectedId)
-                mutable.update { it.copy(messages = messages, loading = false, syncing = false, hasMore = journal.hasMore,
-                    selectedModel = if (v.text("type") == "snapshot") model.ifEmpty { defaultModel } else it.selectedModel,
-                    queued = if (v.text("type") == "event" && v["event"].obj().text("type") == "user/message") false else it.queued) }
+            "events" -> processEvent(value)
+            "control" -> processControl(value)
+            "workspaces" -> processWorkspace(value)
+            else -> if (session != null && !session.offer(value)) {
+                sessionFailed(session, HarnessException("stream/overflow", "会话消息过多，正在重新同步"))
             }
         }
     }
@@ -360,14 +358,17 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
             "emit" -> {
                 val args = v["args"].array()
                 when (v.text("event")) {
-                    "commands/change" -> loadCommands()
+                    "commands/change" -> { commandCache.clear(); loadCommands() }
                     "api-session/added" -> {
                         val row = SessionSummary.parse(args.firstOrNull().obj())
                         mutable.update { it.copy(sessions = (it.sessions.filterNot { s -> s.id == row.id } + row).sortedByDescending { s -> s.updatedAt }) }
                     }
                     "api-session/removed" -> {
                         val id = args.firstOrNull().string()
+                        liveSessions[id]?.let { dropSession(it) }
                         sessionViews.remove(id)
+                        commandCache.remove(id)
+                        scrollPositions.remove(id)
                         mutable.update { it.copy(sessions = it.sessions.filterNot { s -> s.id == id }) }
                     }
                     "api-session/status" -> {
@@ -387,7 +388,12 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         fun applyProjection(id: String, key: String, value: JsonElement?) {
             if (key == "title") mutable.update { it.copy(sessions = it.sessions.map { s -> if (s.id == id && value.string().isNotBlank()) s.copy(title = value.string()) else s }) }
             if (key == "sessionListMetadata" && !value.obj().flag("blank")) markUsed(id)
-            if (key == "modelSelection" && id == state.value.selectedId) mutable.update { it.copy(selectedModel = value.obj()["next"].obj().ifEmpty { defaultModel }) }
+            if (key == "modelSelection") {
+                val model = value.obj()["next"].obj().ifEmpty { defaultModel }
+                liveSessions[id]?.setModel(model)
+                sessionViews[id]?.let { sessionViews.put(id, it.copy(model = model)) }
+                if (id == state.value.selectedId) mutable.update { it.copy(selectedModel = model) }
+            }
         }
         when (v.text("type")) {
             "baseline" -> v["value"].obj()["projections"].obj().forEach { (id, p) -> p.obj()["values"].obj().forEach { (key, value) -> applyProjection(id, key, value) } }
@@ -424,22 +430,18 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         }
     }
     private fun showSession(id: String?) {
-        val previous = state.value
-        previous.selectedId?.takeIf { journal.initialized }?.let {
-            sessionViews.put(it, SessionViewCache.View(previous.messages, previous.selectedModel, previous.hasMore))
-        }
         commandsJob?.cancel()
-        followId?.let { mux?.cancel(it) }
-        followId = null
-        journal = SessionJournal()
-        val cached = id?.let { sessionViews[it] }
+        val live = id?.let { liveSessions[it] }
+        val cached = live?.view ?: id?.let { sessionViews[it] }
+        val commands = id?.let { commandCache[it] }
         mutable.update { it.copy(selectedId = id, messages = cached?.messages.orEmpty(),
-            selectedModel = cached?.model ?: defaultModel, loading = id != null && cached == null,
-            syncing = id != null, hasMore = cached?.hasMore ?: false, loadingOlder = false,
-            error = null, queued = false, commands = emptyList(), commandsLoading = false, commandsError = null) }
+            selectedModel = cached?.model?.ifEmpty { defaultModel } ?: defaultModel, loading = id != null && cached == null,
+            syncing = id != null && live?.view == null, hasMore = cached?.hasMore ?: false, loadingOlder = live?.loadingOlder ?: false,
+            error = null, queued = false, commands = commands.orEmpty(), commandsLoading = false, commandsError = null) }
+        trimLiveSessions()
     }
     fun selectSession(id: String) {
-        if (id == state.value.selectedId && (followId != null || state.value.creatingSelected)) return
+        if (id == state.value.selectedId && (liveSessions[id] != null || state.value.creatingSelected)) return
         showSession(id)
         if (state.value.creatingSelected) return
         store.remember(state.value.server, id)
@@ -455,26 +457,42 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         }
     }
     private fun follow(id: String) {
-        commandsJob?.cancel()
-        followId?.let { mux?.cancel(it) }
-        journal = SessionJournal()
-        val streamId = "session-${UUID.randomUUID()}"; followId = streamId
+        val active = mux ?: return
+        // Visiting a live session is a local operation: no cancel/open or history reset.
+        val existing = liveSessions.remove(id)
+        if (existing != null) {
+            liveSessions[id] = existing
+            mutable.update { it.copy(syncing = existing.view == null) }
+            loadCommands(force = false)
+            return
+        }
+        val session = LiveSession(id, "session-${UUID.randomUUID()}", viewModelScope, ::sessionUpdated, ::sessionFailed)
+        liveSessions[id] = session
+        streams[session.streamId] = session
+        trimLiveSessions()
         mutable.update { it.copy(syncing = true) }
-        followStartedAt = android.os.SystemClock.elapsedRealtime()
-        mux?.open(streamId, "session/follow", jsonObject("request" to jsonObject(
+        active.open(session.streamId, "session/follow", jsonObject("request" to jsonObject(
             "address" to address(id), "maxMessages" to JsonPrimitive(INITIAL_MESSAGES), "assistantStream" to JsonPrimitive(true))))
-        loadCommands()
+        loadCommands(force = false)
     }
-    fun loadCommands() {
+    fun loadCommands(force: Boolean = true) {
         commandsJob?.cancel()
         val id = state.value.selectedId ?: return
         val api = client ?: return
         if (state.value.creatingSelected) return
+        commandCache[id]?.takeIf { !force }?.let { commands ->
+            mutable.update { it.copy(commands = commands, commandsLoading = false, commandsError = null) }
+            return
+        }
         mutable.update { it.copy(commandsLoading = true, commandsError = null) }
         commandsJob = viewModelScope.launch {
             try {
                 val commands = api.rpc("commands/list", jsonObject("agentId" to str(id))).array().map { SlashCommand.parse(it.obj()) }
-                if (api === client && state.value.selectedId == id) mutable.update { it.copy(commands = commands, commandsLoading = false) }
+                if (api === client && state.value.selectedId == id) {
+                    commandCache[id] = commands
+                    while (commandCache.size > 6) commandCache.remove(commandCache.keys.first())
+                    mutable.update { it.copy(commands = commands, commandsLoading = false) }
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 if (api === client && state.value.selectedId == id) mutable.update { it.copy(commandsLoading = false, commandsError = e.message ?: "命令列表加载失败") }
@@ -505,18 +523,24 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     }
     fun loadOlder() {
         val id = state.value.selectedId ?: return
-        if (!state.value.connected || state.value.syncing || state.value.loadingOlder || !journal.hasMore) return
-        val current = journal; val through = current.cursor; val before = current.firstSeq ?: return
+        val current = liveSessions[id] ?: return
+        val snapshot = current.latest ?: return
+        if (!state.value.connected || state.value.syncing || current.loadingOlder || !snapshot.view.hasMore) return
+        val before = snapshot.firstSeq ?: return
         val api = client ?: return
+        current.loadingOlder = true
         mutable.update { it.copy(loadingOlder = true) }
         viewModelScope.launch {
             try {
-                val page = api.command("session/page", jsonObject("address" to address(id), "throughSeq" to JsonPrimitive(through), "beforeSeq" to JsonPrimitive(before), "maxMessages" to JsonPrimitive(60))).obj()
-                if (state.value.selectedId == id && journal === current) { current.prepend(page); mutable.update { it.copy(messages = current.messages(), hasMore = current.hasMore) } }
+                val page = api.command("session/page", jsonObject("address" to address(id), "throughSeq" to JsonPrimitive(snapshot.cursor), "beforeSeq" to JsonPrimitive(before), "maxMessages" to JsonPrimitive(60))).obj()
+                if (liveSessions[id] === current) current.prepend(page)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                if (journal === current) fail(e)
-            } finally { if (journal === current) mutable.update { it.copy(loadingOlder = false) } }
+                if (liveSessions[id] === current && state.value.selectedId == id) fail(e)
+            } finally {
+                current.loadingOlder = false
+                if (liveSessions[id] === current && state.value.selectedId == id) mutable.update { it.copy(loadingOlder = false) }
+            }
         }
     }
     fun createSession(workspaceId: String?, cwd: String, preset: String?, onCreated: () -> Unit) {
@@ -682,7 +706,8 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
                 if (drafts[id] == text) drafts[id] = ""
                 val sentIds = attachments.map { it.id }.toSet()
                 editAttachments(id) { it.filterNot { file -> file.id in sentIds } }
-                if (state.value.selectedId == id) { mutable.update { it.copy(queued = command == null && !journal.hasPrompt(requestId)) }; onAccepted() }
+                val received = liveSessions[id]?.hasPrompt(requestId) == true
+                if (api === client && state.value.selectedId == id) { mutable.update { it.copy(queued = command == null && !received) }; onAccepted() }
             } catch (e: Exception) {
                 if (api !== client || activeSendId != requestId) return@launch
                 val message = if (e is CancellationException) "已取消" else connectionFailureMessage(e, if (promptStarted) "发送失败" else "上传失败")
@@ -710,7 +735,11 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
         operate { api ->
             val selection = jsonObject("sessionId" to str(id), "provider" to str(model.provider), "model" to str(model.id), "reasoningEffort" to effort?.takeIf { it.isNotBlank() }?.let(::str))
             val value = api.command("session/selectModel", selection).obj()["selected"].obj()
-            if (api === client && state.value.selectedId == id) mutable.update { it.copy(selectedModel = value) }
+            if (api === client) {
+                liveSessions[id]?.setModel(value)
+                sessionViews[id]?.let { sessionViews.put(id, it.copy(model = value)) }
+                if (state.value.selectedId == id) mutable.update { it.copy(selectedModel = value) }
+            }
         }
     }
     fun answer(pending: PendingQuestion, value: JsonElement?, delegate: Boolean = false) {
@@ -742,7 +771,7 @@ class HarnessViewModel(application: Application) : AndroidViewModel(application)
     private fun address(id: String) = jsonObject("kind" to str("session"), "sessionId" to str(id))
     private companion object {
         const val INITIAL_MESSAGES = 30
-        const val PREFETCH_SESSIONS = 4
+        const val MAX_LIVE_SESSIONS = 3
     }
     override fun onCleared() { log("界面已销毁，释放实时连接"); stop(stopMonitor = false); super.onCleared() }
 }
