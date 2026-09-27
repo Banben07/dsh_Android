@@ -157,8 +157,10 @@ class HarnessMux(http: OkHttpClient, request: Request, private val onDisconnect:
     private fun recordFailure(reason: String) {
         if (closed || !failureRecorded.compareAndSet(false, true)) return
         closeReason = reason
-        runCatching { onDisconnect(reason) }
         failed = true
+        // Publish failure before logging: resume may run while a diagnostics callback
+        // is waiting on storage, and must not mistake this dead socket for a live one.
+        runCatching { onDisconnect(reason) }
     }
     private val probes = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val socket = http.newWebSocket(request, object : WebSocketListener() {

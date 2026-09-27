@@ -2,6 +2,7 @@ package dev.harness.core
 
 import java.net.InetAddress
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.net.SocketFactory
@@ -109,6 +110,33 @@ class HarnessLifecycleTest {
                     assertEquals("protocol/frame", (failure as HarnessException).code)
                     assertNull(failures.poll(200, TimeUnit.MILLISECONDS), "Socket cancellation must not replace the original failure")
                     assertEquals("protocol/frame: 无法读取实时数据", mux.closeReason)
+                }
+            }
+        }
+    }
+
+    @Test fun `transport failure is visible while diagnostics are still being written`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val opened = LinkedBlockingQueue<WebSocket>()
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) { opened.offer(webSocket) }
+            }))
+            HarnessClient(ServerAddress.parse(server.url("/").toString()), OkHttpClient()).use { api ->
+                val logging = CountDownLatch(1)
+                val releaseLog = CountDownLatch(1)
+                val mux = api.mux {
+                    logging.countDown()
+                    check(releaseLog.await(3, TimeUnit.SECONDS))
+                }
+                try {
+                    assertNotNull(opened.poll(3, TimeUnit.SECONDS))?.close(1001, "background timeout")
+                    assertTrue(logging.await(3, TimeUnit.SECONDS), "The transport callback must start")
+                    assertTrue(mux.failed, "Resume must see a failed socket even while logging blocks")
+                    assertEquals("remote close 1001 background timeout", mux.closeReason)
+                } finally {
+                    releaseLog.countDown()
+                    mux.close()
                 }
             }
         }
