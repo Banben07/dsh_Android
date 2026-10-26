@@ -1,135 +1,92 @@
 # DeepSeek Harness Android
 
-DeepSeek harness 的原生安卓客户端。Kotlin + Jetpack Compose 实现界面，OkHttp 连接你已有的 harness 服务。Markdown 使用原生 TextView 渲染，没有 WebView、Electron 或内嵌网页。
+DeepSeek Harness 的独立原生 Android 客户端，当前版本 **0.3.9**，支持 **Android 8.0 及以上**。使用 Kotlin、Jetpack Compose 和 OkHttp 实现，不嵌入 WebView 或 Electron。模型调用、工具执行和工作文件由你自己的 Harness 服务器管理。
 
-**Android 8.0 及以上。** 使用手机可以访问的服务器 `IP:端口` 或 HTTP/HTTPS 域名，支持局域网、公网及 ZeroTier、Tailscale 等网络。
+本项目非 DeepSeek 官方 Android 应用。鲸鱼图标的品牌及标识属于 DeepSeek。
 
 ## 下载与连接
 
-1. 打开 [Releases](https://github.com/Banben07/dsh_Android/releases)，下载最新开发预览中的 `app-debug.apk` 并安装。
-2. 确认手机能够访问服务器；使用局域网时连接相应网络，使用 VPN 时按需连接 VPN。
-3. 启动 DeepSeek Harness，填写例如 `http://192.168.1.10:3000` 或 `https://harness.example.com`。不带协议的 `IP:端口` 默认使用 HTTP。
-4. 首次连接需要 harness 启动时输出的登录 `token`。可以分别填写地址与 Token，或粘贴完整的 `http://IP:端口/?token=…` 链接。如果启动链接使用 `127.0.0.1`，请换成手机实际可访问的服务器地址，保留 token。
-5. 打开已有会话，或点击右上角“＋”或侧栏的“新建对话”开始。工作空间、服务器目录和代理预设可在“设置 → 新对话默认设置”中预先保存。
+1. 前往 [Releases](https://github.com/Banben07/dsh_Android/releases) 下载最新预览版的 `app-debug.apk`。
+2. 确认手机能访问 Harness 服务器；局域网、ZeroTier 和 Tailscale 均使用手机已有的网络连接。
+3. 填写服务器根地址，例如 `https://harness.example.com` 或 `http://192.0.2.10:3000`。不带协议时默认使用 HTTP。
+4. 填写 Harness 启动时提供的登录 Token，或粘贴完整启动链接。这里使用的是 **Harness 登录 Token**，不是模型 API Key。
+5. 打开已有会话，或点击右上角“＋”新建会话。工作空间、目录和代理预设可在设置中保存为新对话默认值。
 
-使用 ZeroTier 时，手机连接与服务器互通的 ZeroTier 网络，服务地址填写服务器的 ZeroTier IP 和 harness 端口，例如 `http://10.147.17.10:3000`。客户端无需额外配置 VPN 协议。
+文档及界面中的 `192.0.2.10` 和 `2001:db8::1` 是保留的文档示例地址；`example.com` 是示例域名。使用时请替换为自己的服务器地址。服务暂不支持 `/harness/` 等子路径部署。
 
-这里填写的是 **harness 的登录 Token**，不是 DeepSeek API Key。模型凭据、工具和工作文件继续由服务器管理。连接地址保存在本机；登录 Cookie 按地址隔离，使用 Android Keystore 加密；启动 Token 不保存。应用直接使用手机当前的网络连接。
+HTTPS 反向代理应转发 HTTP 与 `/api/remote.mux` WebSocket，并保留登录响应的 `Set-Cookie`。HTTP 401 表示需要登录；HTTP 403 时请检查服务器 `trustedHosts` 是否允许所填地址与端口。
 
-HTTPS 反向代理需要同时转发 HTTP 请求与 `/api/remote.mux` WebSocket，并保留登录响应的 `Set-Cookie`。当前客户端使用服务根路径，暂不支持 `/harness/` 等子路径部署。
+## 功能
 
-如果收到 403，检查服务的 `trustedHosts` 是否包含你填写的 IP 和端口；如果收到 401，用服务当前的启动链接重新登录。该客户端不会更改服务器的监听地址、信任配置或认证策略。
+- 原生手机和平板布局、深浅色主题、可调字号、Markdown、代码和表格显示，以及文字复制。
+- 会话搜索、工作空间筛选、一键新建、重命名、长按归档与取消归档。
+- 模型和思考强度选择、流式回复、排队发送、引导当前任务与停止执行。
+- 思考过程和工具调用合并展示，默认显示最新一项，较早过程可展开查看。
+- 原生审批、单选、多选、自定义问题回答与计划确认。
+- `/` 命令菜单、服务器命令执行、原生文件选择和会话 ZIP 导出。
+- 多图片与文件附件、缩略图、上传进度、取消和失败后重试；实际格式与大小限制由服务器决定。
+- 可选的回复完成、审批与提问通知，点击通知打开对应会话。
+- 连接测试、本机连接日志和崩溃记录复制。
 
-## 已实现
+### 会话切换
 
-- 原生手机与平板布局，系统深浅色主题。
-- 会话列表、本地标题/目录搜索、工作空间筛选；长按会话选择归档，在“已归档”列表中长按可取消归档，状态同步到服务器。
-- 一键新建会话；每个服务器分别保存默认工作空间、目录和代理预设；重命名会话。
-- 模型与思考强度选择、实时回复；设置中调节字体大小（80%–150%），即时生效并保存在本机，100% 跟随系统字体大小。
-- Markdown、代码、表格、文字选择复制。
-- 思考过程与工具调用合并到一个分组，每个会话默认只显示最新一项，较早的过程统一收进可展开的历史列表；正文仍显示在对话中。
-- `/` 菜单读取服务器命令目录并执行真实命令，显示结果和失败原因；原生模型选择、文件选择、设置、新会话与会话 ZIP 导出。
-- 系统文件选择器选择多个图片或文件，显示缩略图、名称、大小、进度，支持取消和失败后重试。
-- 可选的后台通知：回复完成、需要确认操作或回答问题时提醒，点击通知打开对应会话。
-- 设置中的连接测试与本地崩溃记录复制。
-- 排队发送、引导当前任务、停止执行。
-- 单次操作允许/拒绝、单选/多选/自定义问题回答、计划确认。
-- Cookie 登录，WebSocket 心跳，断线重连、全量快照替换、历史分页与流片段序号检查。
-- 切换会话保留草稿。发送失败保留输入，不自动重发可能已送达的请求。
+最近访问的最多三个会话复用同一条主 WebSocket，保留各自订阅并持续接收更新。切换回来无需重新请求完整历史；命令列表和阅读位置也会保留。每个订阅按顺序在工作线程处理快照、增量和分页。
 
-### 附件与命令
+订阅按访问顺序、数据字符预算和后台消息数量淘汰。另保留最多六个会话的显示缓存，总显示文本预算为 200 万字符，单会话最多 500 条显示消息。当前正在阅读的会话不因后台缓存预算被关闭。淘汰或断网后重新打开时先显示缓存，再同步服务器快照。初次读取最近 30 条消息，更早历史可分页加载。
 
-点击输入框旁的附件按钮可选择图片或任意文件，也可以使用 `/file`。PNG、JPEG、WebP、GIF 作为图片发送；HEIC、SVG 等其他格式按普通文件发送。服务端仍会应用自己的大小、格式和模型能力限制。普通文件通过二进制接口上传，图片直接编码到请求流；不会把整个上传文件读入内存。历史图片可以点击查看。
+文字与附件草稿按会话保留到进程结束。发送失败时保留输入，应用不会自动重发可能已经送达的消息；请确认服务器是否收到后再重试。
 
-输入 `/` 查看可用命令。模型选择和文件选择打开原生界面，其余服务器命令通过 `commands/execute` 执行；未知命令会提示错误。`/export` 在系统保存对话框中选择位置后下载会话 ZIP。第三方插件若依赖自定义网页面板，当前只支持它们公开的命令及文本结果。
+### 后台连接与通知
 
-新建对话立即进入创建页面，服务器确认后即可输入，不再等待整个会话列表刷新或首份历史快照。0.3.8 起，同一服务器的会话共用实时连接，最近打开的最多 3 个会话保留订阅和历史状态；在这些会话之间切换不再取消订阅、重复请求快照或重新加载命令列表。暂未显示的会话仍接收更新，回到该会话即可看到新内容。取消启动时同时预取 4 个会话，优先加载实际打开的会话。每个订阅按顺序在工作线程整理快照、增量和分页，避免一个会话的历史处理阻塞其他会话与控制事件。单个会话出现事件缺口时只重建该订阅，保留共享连接。
+“后台保持连接”通过 Android 前台服务维持进程。关闭此选项后，应用进入后台约八秒释放主连接，回到前台重新同步。开启回复通知时，服务会建立独立的通知监听连接。
 
-订阅按最近访问顺序淘汰，并参考接收数据与显示文本的字符预算（约 200 万字符）及后台会话消息数量；当前正在阅读的会话不因该预算被关闭。淘汰或断网后另保留最多 6 个会话的显示缓存，总计不超过 200 万字符、单会话不超过 500 条显示消息。重新打开时先显示缓存，再同步服务器快照。首次快照读取最近 30 条消息，更早内容点击“加载更早的消息”分页读取。阅读位置按会话保留，切换回来时恢复消息位置与偏移；正在跟随最新消息的会话继续显示最新内容。真实断网后的历史恢复仍需同步，以上优化不保证系统限制后台运行时持续在线。
+**后台持续在线和通知及时送达受 Android、手机厂商及 VPN 的后台策略影响。当前版本不保证在智能省电模式下持续在线 5–10 分钟。** 前台服务不能保证绕过系统冻结或网络暂停。连接失效后应用会保留显示内容并尝试恢复。
 
-没有发送过消息的新对话在切换到其他会话后不再显示在列表中（harness 没有删除会话的接口，服务器上仍保留）。最新消息进入屏幕后，“跳到最新消息”按钮即隐藏。顶栏右侧的“＋”可直接新建对话，发送消息后输入法会立即收起。
+回到前台时会检查原连接，无响应时重新连接。当前版本会先发布 socket 失效状态，再记录断连日志，避免恢复检查读取到过时状态；这项修正没有解决系统限制造成的后台断网。
 
-文字和附件草稿按会话保留到应用进程结束。发送失败后会保留输入；如果请求已经发出但没有收到确认，请先查看会话，避免重复发送。
+如果遇到断连，可在设置中复制连接日志；闪退后可复制上次崩溃记录。记录保存在本机并对常见凭据格式进行隐藏，分享前请自行检查是否包含敏感内容。`EOFException` 本身无法确定是服务器心跳超时、VPN 路由中断还是其他链路问题，应结合服务器日志判断。
 
-### 后台通知与崩溃记录
+## 数据与隐私
 
-“后台保持连接”默认开启，通过安卓前台服务维持进程和会话连接。未开启回复通知时，后台服务只负责保活应用进程，不再建立第二条 Harness 实时连接；开启回复通知时才建立后台监听。普通切换应用后沿用原来的实时连接，失效时自动重建；返回前台会先用只读工作区流检查原 WebSocket，回应在网络线程上确认，界面繁忙时不会把正常连接误判为失效；5 秒内无回应的半开连接会静默重建。重连前在后台线程清理失效的空闲 HTTP 连接，不取消正在发送的请求，也不自动重发消息。短暂恢复保留聊天内容，连续失败仍显示错误，不再固定在 8 秒后断开；会显示一条后台连接通知。可以在设置中关闭此功能，关闭时也会关闭回复完成通知。
+- 服务器地址保存在本机，登录 Cookie 按地址隔离并使用 Android Keystore 加密；启动 Token 不保存。
+- 模型 API Key、工具权限及服务器工作文件由 Harness 后端管理。
+- 仓库不需要真实服务器 IP、私人域名、登录 Token、Cookie 或模型凭据即可构建和运行测试。
+- `local.properties`、本地构建产物、签名密钥和 IDE 配置不应提交。
 
-在设置中开启“回复完成与待处理通知”，并允许安卓通知权限。应用会显示一条后台消息连接通知，在退到后台或锁屏时监听完成事件；点击完成提醒返回会话。需要确认操作或回答问题时，后台连接只发出“审批与提问”提醒而不代为回答，打开应用后照常处理；在任一客户端处理后提醒自动撤回。服务器上的 notify-on-complete 插件只发送服务器本机桌面通知，与手机提醒无关。取消或失败的任务不会显示为完成，首次连接也不会把旧会话当成新回复通知。若系统强制停止应用、网络断开或手机限制后台运行，提醒可能延迟或无法送达。
+## 构建
 
-关闭“后台保持连接”后，应用进入后台约 8 秒后释放实时连接，服务器任务继续执行，回到前台重新同步。开启回复完成通知时会同时开启后台连接。系统强制结束进程或网络实际中断后仍需重连。部分机型的后台限制也可能影响连接，但仅凭返回前台时显示“socket 已失效”不能确定原因，也不能认定必须开启“完全允许后台行为”。应先检查连接日志中的底层异常。
+GitHub [Actions](https://github.com/Banben07/dsh_Android/actions/workflows/android.yml) 在推送 `main` 或手动运行后，执行测试、Android Lint 与 APK 构建，通过后发布预览 Release。构建不访问你的 Harness 服务，也不需要服务器登录凭据或模型 API Key。
 
-0.3.7 起，底层断连原因直接在网络回调中记录，避免回到前台立即重连时取消旧任务、丢失尚未处理的异常。日志区分实时会话连接与回复通知连接，并保留首次故障原因；主动关闭连接不会被误记为底层断连。0.3.9 起先将 socket 标为失效再记录日志，避免回到前台的日志误报“socket 存活”，也让恢复流程立即识别失效连接。这些修正不代表已经解决系统冻结或网络中断。
-
-如果切换应用后仍出现断连，在设置中点击“复制连接日志”，其中记录前后台切换、连接检查耗时、实时连接中断的底层原因、后台服务启停、每次提醒发送或跳过的原因以及打开会话的耗时，同样仅保存在本机并隐藏服务地址与凭据。如果发生闪退，重新打开应用，在设置中点击“复制上次崩溃记录”。记录包含应用版本、安卓版本、设备型号和异常堆栈，仅保存在本机，并对常见凭据格式进行隐藏；发送给他人前仍可检查内容。系统直接终止进程的情况不一定产生异常记录。根据一加 13T（Android 36）的崩溃记录，已将切换地址时的 TLS 连接池关闭、实时连接关闭和 HTTP 请求取消统一移到后台线程；也已修正网络响应在界面线程读取、流式工具条目标识冲突等问题。修复有自动化回归验证，仍需真机复测。
-
-如果打开较大的会话时连接断开（连接日志出现 `EOFException`），通常是 harness 默认 2 秒的 WebSocket 心跳过于严格：大快照经 VPN 传输期间客户端的心跳回应排在数据之后，超过约 4–6 秒服务器就会断开连接。可在 `~/.dsh/profiles/web/cordis.patch.yml` 中加入以下条目并重启 `dsh web`：
-
-手机在后台暂停网络或执行时，即使心跳已调到 10 秒，也可能错过服务器 Ping；这时两个独立的 WebSocket 可能在唤醒时一起报告 `EOFException`。增加心跳间隔只能作为对照实验，还会延迟真正断线的检测，不保证在系统限制后台网络时连续在线 5–10 分钟。此时应用会保留当前内容，并在回到前台后重新连接和同步。
-
-```yaml
-- id: typert-gateway
-  config:
-    websocketHeartbeatIntervalMs: 10000
-```
-
-### HTTP 连接排查
-
-HTTP 和 HTTPS 均已启用，客户端使用安卓系统的当前路由，不额外绑定 Wi-Fi 或蜂窝网络。设置中的“测试连接”不发送 Token，会显示该地址是否响应以及系统是否检测到 VPN。实际连接失败会显示登录、实时连接或会话同步阶段及具体原因。测试显示 HTTP 401 表示网络入口可达、需要登录，并不表示网络不通。
-
-如果手机浏览器能打开同一个 IP:端口而应用仍失败，请保留完整错误和测试结果；仅根据 HTTPS 正常无法确定是 ZeroTier 路由、登录还是 WebSocket 问题。
-
-此版本是开发预览，使用 debug 签名；不同干净构建环境的 debug 签名可能不同，更新时若签名冲突需先卸载旧版，再重新登录。卸载会清除本机设置及草稿，服务器会话不受影响。当前不提供原生终端或第三方插件专用面板。
-
-## 协议兼容性
-
-按照 [DeepSeek harness](https://github.com/deepseek-ai/deepseek-harness) 的实际 Connection/Gateway 和 Session Controller 协议实现，并用本机安装的 `0.1.6-alpha.2` 生成描述符校验请求。harness 仍在快速变化；不保证旧版 SSE 或未来不兼容协议可直接连接。
-
-| 功能 | 接口 |
-| --- | --- |
-| 登录 | `GET /?token=…` 换取 authority-bound Cookie |
-| 普通请求 | `POST /api/<namespace>/<method>`，`client-request`/`server-response` 信封 |
-| 实时数据 | `/api/remote.mux` WebSocket；`$events` ready 后读取基线 |
-| 会话 | `session/list/create/follow/page/prompt/cancel/rename` |
-| 实时状态 | `session/control`、`workspace/follow/archiveSession/unarchiveSession` |
-| 模型与预设 | `session/modelCatalog/selectModel`、`agentPresets/list` |
-| 附件 | `POST /api/session/uploadFileBinary`、`session/attachment`、图片及文件 prompt parts |
-| 命令与导出 | `commands/list/execute`、`GET /api/session.export` |
-| 审批与问题 | `$events` waterfall，`$events/result` 带 clientId/eventId 回答 |
-
-参考：[Connection](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/connection/README.md)、[API Gateway](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/api-gateway.md)。没有把 harness 假定为 OpenAI Chat Completions 服务。
-
-## GitHub 远程构建
-
-推送到 `main` 或在 [Actions](https://github.com/Banben07/dsh_Android/actions/workflows/android.yml) 页面选择 **Run workflow**。流水线执行协议测试、Android Lint 和 APK 编译，通过后将 APK 保存为 Artifact 并发布带构建编号的预览 Release。构建过程不需要访问你的服务器网络、后端登录 Token 或模型 API Key。
-
-构建版本固定为 JDK 17、Gradle 8.11.1、Android Gradle Plugin 8.9.2、Kotlin 2.1.20、Android SDK 35。Gradle Wrapper 包含 SHA-256 校验。当前工程无需 Android Studio 即可通过 Actions 构建。
-
-## 本地开发与验证
-
-安装 JDK 17、SDK Platform 35、Build-Tools 35.0.0 和 Platform-Tools，设置 `ANDROID_HOME`，或在 `local.properties` 中设置 `sdk.dir`。所有工具都可安装在用户目录，无需 sudo。
+本地需要 JDK 17、Android SDK Platform 35、Build-Tools 35.0.0 和 Platform-Tools。设置 `ANDROID_HOME`，或在被 Git 忽略的 `local.properties` 中填写 `sdk.dir`。这些工具可以安装在用户目录，无需 sudo。
 
 ```bash
 ./gradlew :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。`core` 为独立 JVM 模块，协议测试使用本地 MockWebServer，覆盖 Cookie 交换、RPC 信封、WebSocket、取消、断流、历史与流式消息衔接、上传字节、命令参数、导出和完成事件；原生界面测试覆盖审批、命令菜单、附件交互和工具折叠，不调用真实模型。
+APK 输出位置：`app/build/outputs/apk/debug/app-debug.apk`。
 
-如果本机安装了 harness，可以另外验证请求是否符合后端实际生成的接口：
+工程使用 Gradle 8.11.1、Android Gradle Plugin 8.9.2 和 Kotlin 2.1.20。协议测试使用本地 MockWebServer，界面测试使用 Robolectric，不调用真实模型。
+
+开发预览使用 debug 签名。不同构建环境的签名可能不同，签名冲突时无法直接覆盖安装；卸载会清除本机设置与草稿，服务器会话不受影响。
+
+## 协议兼容性与代码结构
+
+客户端实现 Harness 的 Cookie 登录、RPC 信封、`/api/remote.mux` 及会话、文件、命令、审批接口。请求曾通过 Harness `0.1.6-alpha.2` 的实际生成描述符校验；其他版本的兼容性需要验证，不能保证兼容未来的协议变更。
+
+| 目录 | 用途 |
+| --- | --- |
+| `core/` | 地址、HTTP、WebSocket、会话事件还原和协议测试 |
+| `app/` | Compose 界面、会话状态、通知与加密 Cookie 存储 |
+| `.github/workflows/android.yml` | 测试、构建和预览发布 |
+| `fixtures/requests.json` | 不含真实用户数据的协议请求样例 |
+| `tools/verify-harness-contract.mjs` | 与已安装 Harness 描述符核对接口 |
+
+可选的接口校验：
 
 ```bash
 node tools/verify-harness-contract.mjs /path/to/harness/node_modules
 ```
 
-`fixtures/requests.json` 不包含任何真实登录信息或工作区数据。不要将启动链接、Cookie、API Key 或个人签名密钥写入仓库。
+参考：[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)、[Connection](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/connection/README.md)、[API Gateway](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/api-gateway.md)。
 
-## 代码结构
-
-- `core/`：地址解析、HTTP/Cookie 接口、WebSocket、会话事件还原和 JVM 测试。
-- `app/`：Jetpack Compose 界面、生命周期与状态管理、Android Keystore Cookie 存储。
-- `.github/workflows/android.yml`：测试、编译与预览 APK 发布。
-- `tools/verify-harness-contract.mjs`：与实际 harness 描述符的兼容性校验。
-
-应用鲸鱼图标使用 DeepSeek harness 官方 `@deepseek-ai/dsh-web-frontend` 包的 `dist/favicon.svg` 路径数据，转换为原生 Android VectorDrawable。品牌及标识属于 DeepSeek。
-
-本项目为独立客户端，非 DeepSeek 官方安卓应用。
+仓库目前未附带开源许可证；公开可见不等于已经授予修改、再分发或商用许可。第三方组件和 DeepSeek 品牌标识分别受其自身授权约束。

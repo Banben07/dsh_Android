@@ -46,7 +46,7 @@ fun ConnectionDialog(state: HarnessState, connect: (String, String) -> Unit, dis
                 BrandMark(46)
                 Text("DeepSeek Harness 设置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 Text("填写手机可以访问的 harness 地址，支持 HTTP、HTTPS，以及带 token 的启动链接。", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-                OutlinedTextField(server, { server = it }, label = { Text("服务地址") }, placeholder = { Text("192.168.1.10:3000 或 https://harness.example.com") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), leadingIcon = { Icon(Icons.Default.Dns, null, Modifier.size(20.dp)) })
+                OutlinedTextField(server, { server = it }, label = { Text("服务地址") }, placeholder = { Text("192.0.2.10:3000 或 https://harness.example.com") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), leadingIcon = { Icon(Icons.Default.Dns, null, Modifier.size(20.dp)) })
                 OutlinedTextField(token, { token = it }, label = { Text("启动 Token") }, supportingText = { Text("首次登录需要；已有 Cookie 时可留空。这里不是 DeepSeek API Key。") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
                     visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(), trailingIcon = { IconButton(onClick = { visible = !visible }) { Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (visible) "隐藏 Token" else "显示 Token") } })
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }

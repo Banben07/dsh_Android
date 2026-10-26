@@ -49,10 +49,10 @@ class NativeScreensTest {
         var result: Pair<String, String>? = null
         compose.setContent { HarnessTheme { ConnectionDialog(HarnessState(), { address, token -> result = address to token }, {}, {}) } }
         compose.onNodeWithText("连接服务").assertIsNotEnabled()
-        compose.onNode(hasSetTextAction() and hasText("服务地址")).performTextInput("100.80.20.10:3000")
+        compose.onNode(hasSetTextAction() and hasText("服务地址")).performTextInput("192.0.2.10:3000")
         compose.onNode(hasSetTextAction() and hasText("启动 Token")).performTextInput("test-token")
         compose.onNodeWithText("连接服务").performClick()
-        assertEquals("100.80.20.10:3000" to "test-token", result)
+        assertEquals("192.0.2.10:3000" to "test-token", result)
     }
 
     @Test fun approvalOnlySendsAnExplicitSingleUseDecision() {
